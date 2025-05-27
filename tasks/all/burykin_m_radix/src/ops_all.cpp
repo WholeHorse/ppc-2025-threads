@@ -115,36 +115,26 @@ bool burykin_m_radix_all::RadixALL::PreProcessingImpl() {
 }
 
 void burykin_m_radix_all::RadixALL::Squash(boost::mpi::communicator& group) {
-  const auto numprocs = static_cast<std::size_t>(group.size());
-
-  // Бинарное дерево сбора результатов
-  for (std::size_t step = 1; step < numprocs; step *= 2) {
-    if (group.rank() % (2 * step) == 0) {
-      const int partner = group.rank() + static_cast<int>(step);
-      if (partner < static_cast<int>(numprocs)) {
-        // Получаем размер данных от партнера
-        int partner_size = 0;
-        group.recv(partner, 0, partner_size);
-
-        if (partner_size > 0) {
-          // Получаем данные
-          const std::size_t old_size = procchunk_.size();
-          procchunk_.resize(old_size + partner_size);
-          group.recv(partner, 0, procchunk_.data() + old_size, partner_size);
-
-          // Объединяем отсортированные массивы
-          std::ranges::inplace_merge(procchunk_, procchunk_.begin() + static_cast<std::ptrdiff_t>(old_size));
-        }
+  if (group.rank() == 0) {
+    // Ранг 0 принимает данные от всех остальных процессов
+    for (int i = 1; i < group.size(); ++i) {
+      int partner_size = 0;
+      group.recv(i, 0, partner_size);  // Получаем размер данных от процесса i
+      if (partner_size > 0) {
+        std::vector<int> partner_data(partner_size);
+        group.recv(i, 0, partner_data.data(), partner_size);  // Получаем данные
+        // Сливаем текущий procchunk_ с полученными данными
+        std::vector<int> temp;
+        std::ranges::merge(procchunk_, partner_data, std::back_inserter(temp));
+        procchunk_ = std::move(temp);
       }
-    } else if ((group.rank() % step) == 0) {
-      // Отправляем данные мастеру
-      const int size = static_cast<int>(procchunk_.size());
-      const int master = group.rank() - static_cast<int>(step);
-      group.send(master, 0, size);
-      if (size > 0) {
-        group.send(master, 0, procchunk_.data(), size);
-      }
-      break;  // Процесс больше не участвует
+    }
+  } else {
+    // Все остальные процессы отправляют свои данные рангу 0
+    const int size = static_cast<int>(procchunk_.size());
+    group.send(0, 0, size);  // Отправляем размер
+    if (size > 0) {
+      group.send(0, 0, procchunk_.data(), size);  // Отправляем данные
     }
   }
 }
