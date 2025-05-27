@@ -2,40 +2,94 @@
 
 #include <algorithm>
 #include <array>
-#include <boost/mpi/collectives.hpp>
 #include <boost/mpi/communicator.hpp>
-#include <functional>
+#include <climits>
+#include <cstddef>
+#include <cstdint>
 #include <numeric>
-#include <queue>
+#include <ranges>
+#include <span>
 #include <utility>
 #include <vector>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
+#include "boost/mpi/collectives/broadcast.hpp"
+#include "core/util/include/util.hpp"
+
+namespace {
+std::vector<std::span<int>> Distribute(std::span<int> arr, std::size_t n) {
+  std::vector<std::span<int>> chunks(n);
+  const std::size_t delta = arr.size() / n;
+  const std::size_t extra = arr.size() % n;
+
+  auto* cur = arr.data();
+  for (std::size_t i = 0; i < n; i++) {
+    const std::size_t sz = delta + ((i < extra) ? 1 : 0);
+    chunks[i] = std::span{cur, cur + sz};
+    cur += sz;
+  }
+
+  return chunks;
+}
+
+void RadixSortInt(std::span<int> v) {
+  if (v.empty()) return;
+
+  std::vector<int> a(v.begin(), v.end());
+  std::vector<int> b(a.size());
+
+  for (int shift = 0; shift < 32; shift += 8) {
+    std::array<int, 256> count = {};
+
+    // Compute frequency
+    for (const int val : a) {
+      unsigned int key = ((static_cast<unsigned int>(val) >> shift) & 0xFFU);
+      if (shift == 24) {
+        key ^= 0x80;
+      }
+      ++count[key];
+    }
+
+    // Compute indices
+    std::array<int, 256> index = {0};
+    for (int i = 1; i < 256; ++i) {
+      index[i] = index[i - 1] + count[i - 1];
+    }
+
+    // Distribute elements
+    for (const int val : a) {
+      unsigned int key = ((static_cast<unsigned int>(val) >> shift) & 0xFFU);
+      if (shift == 24) {
+        key ^= 0x80;
+      }
+      b[index[key]++] = val;
+    }
+
+    a.swap(b);
+  }
+
+  std::copy(a.begin(), a.end(), v.begin());
+}
+}  // namespace
 
 std::array<int, 256> burykin_m_radix_all::RadixALL::ComputeFrequency(const std::vector<int>& a, const int shift) {
   std::array<int, 256> count = {};
 
-  if (a.empty()) {
-    return count;
-  }
-
-#pragma omp parallel
+#pragma omp parallel default(none) shared(a, count, shift)
   {
+    // Each thread maintains its own local counter
     std::array<int, 256> local_count = {};
 
-#pragma omp for schedule(static) nowait
+#pragma omp for nowait
     for (int i = 0; i < static_cast<int>(a.size()); ++i) {
       const int v = a[i];
       unsigned int key = ((static_cast<unsigned int>(v) >> shift) & 0xFFU);
       if (shift == 24) {
-        key ^= 0x80U;  // Обработка знакового бита
+        key ^= 0x80;
       }
       ++local_count[key];
     }
 
-    // Используем критическую секцию для безопасного объединения счетчиков
+// Merge local counters into the shared counter
 #pragma omp critical
     {
       for (int i = 0; i < 256; ++i) {
@@ -48,8 +102,8 @@ std::array<int, 256> burykin_m_radix_all::RadixALL::ComputeFrequency(const std::
 }
 
 std::array<int, 256> burykin_m_radix_all::RadixALL::ComputeIndices(const std::array<int, 256>& count) {
-  std::array<int, 256> index = {};
-  // Вычисление префиксных сумм
+  std::array<int, 256> index = {0};
+  // This loop has sequential dependency, cannot be parallelized
   for (int i = 1; i < 256; ++i) {
     index[i] = index[i - 1] + count[i - 1];
   }
@@ -58,312 +112,178 @@ std::array<int, 256> burykin_m_radix_all::RadixALL::ComputeIndices(const std::ar
 
 void burykin_m_radix_all::RadixALL::DistributeElements(const std::vector<int>& a, std::vector<int>& b,
                                                        std::array<int, 256> index, const int shift) {
-  if (a.empty()) {
-    b.clear();
-    return;
-  }
+  // Create a copy of indices for parallel access
+  std::array<int, 256> local_index = index;
 
-  // Убедимся, что выходной массив имеет правильный размер
-  b.resize(a.size());
+  // Calculate offset for each element
+  std::vector<int> offsets(a.size());
 
-  // Упрощенная версия без использования OpenMP thread functions
-  // Используем bucket подход для избежания race conditions
-  std::vector<std::vector<int>> buckets(256);
-
-#pragma omp parallel
-  {
-    std::vector<std::vector<int>> local_buckets(256);
-
-#pragma omp for schedule(static) nowait
-    for (int i = 0; i < static_cast<int>(a.size()); ++i) {
-      const int v = a[i];
-      unsigned int key = ((static_cast<unsigned int>(v) >> shift) & 0xFFU);
-      if (shift == 24) {
-        key ^= 0x80U;
-      }
-      local_buckets[key].push_back(v);
+#pragma omp parallel for default(none) shared(a, offsets, local_index, shift)
+  for (int i = 0; i < static_cast<int>(a.size()); ++i) {
+    const int v = a[i];
+    unsigned int key = ((static_cast<unsigned int>(v) >> shift) & 0xFFU);
+    if (shift == 24) {
+      key ^= 0x80;
     }
 
-    // Объединяем локальные buckets в глобальные (критическая секция)
+    int pos = 0;
 #pragma omp critical
     {
-      for (int k = 0; k < 256; ++k) {
-        if (!local_buckets[k].empty()) {
-          buckets[k].insert(buckets[k].end(), local_buckets[k].begin(), local_buckets[k].end());
-        }
-      }
+      pos = local_index[key];
+      local_index[key]++;
     }
+
+    // Store position for later use
+    offsets[i] = pos;
   }
 
-  // Записываем результат в правильном порядке
-  int pos = 0;
-  for (int k = 0; k < 256; ++k) {
-    for (int val : buckets[k]) {
-      b[pos++] = val;
-    }
+// Distribute elements to output array using calculated offsets
+#pragma omp parallel for default(none) shared(a, b, offsets)
+  for (int i = 0; i < static_cast<int>(a.size()); ++i) {
+    b[offsets[i]] = a[i];
   }
-}
-
-std::vector<int> burykin_m_radix_all::RadixALL::PerformKWayMerge(const std::vector<int>& all_data,
-                                                                 const std::vector<int>& sizes,
-                                                                 const std::vector<int>& displs) {
-  std::vector<int> result;
-  if (all_data.empty() || sizes.empty()) {
-    return result;
-  }
-
-  result.reserve(all_data.size());
-
-  // Указатели на текущие позиции в каждом массиве
-  std::vector<int> indices(sizes.size(), 0);
-
-  using Element = std::pair<int, int>;  // {value, array_index}
-  std::priority_queue<Element, std::vector<Element>, std::greater<Element>> pq;
-
-  // Инициализация очереди первыми элементами каждого массива
-  for (size_t i = 0; i < sizes.size(); ++i) {
-    if (sizes[i] > 0 && displs[i] < static_cast<int>(all_data.size())) {
-      pq.push({all_data[displs[i]], static_cast<int>(i)});
-    }
-  }
-
-  // K-way merge
-  while (!pq.empty()) {
-    auto current = pq.top();
-    pq.pop();
-
-    int value = current.first;
-    int array_idx = current.second;
-
-    result.push_back(value);
-    indices[array_idx]++;
-
-    // Добавляем следующий элемент из того же массива
-    if (indices[array_idx] < sizes[array_idx]) {
-      int next_pos = displs[array_idx] + indices[array_idx];
-      if (next_pos < static_cast<int>(all_data.size())) {
-        pq.push({all_data[next_pos], array_idx});
-      }
-    }
-  }
-
-  return result;
-}
-
-bool burykin_m_radix_all::RadixALL::PreProcessingImpl() {
-  if (!task_data || task_data->inputs.empty() || task_data->inputs_count.empty()) {
-    original_size_ = 0;
-    input_.clear();
-    output_.clear();
-    return true;
-  }
-
-  const unsigned int input_size = task_data->inputs_count[0];
-  auto* in_ptr = reinterpret_cast<int*>(task_data->inputs[0]);
-
-  original_size_ = static_cast<int>(input_size);
-
-  // Only rank 0 has the original data
-  std::vector<int> original_data;
-  if (world_.rank() == 0 && input_size > 0 && in_ptr != nullptr) {
-    original_data.assign(in_ptr, in_ptr + input_size);
-  }
-
-  // Single process optimization
-  if (world_.size() == 1) {
-    input_ = std::move(original_data);
-    output_.resize(input_.size());
-    return true;
-  }
-
-  // Broadcast size to all processes
-  try {
-    boost::mpi::broadcast(world_, original_size_, 0);
-  } catch (const std::exception& e) {
-    return false;
-  }
-
-  if (original_size_ <= 0) {
-    input_.clear();
-    output_.clear();
-    return true;
-  }
-
-  // Calculate distribution
-  int base_size = original_size_ / world_.size();
-  int remainder = original_size_ % world_.size();
-
-  std::vector<int> send_counts(world_.size());
-  std::vector<int> displs(world_.size());
-
-  for (int i = 0; i < world_.size(); ++i) {
-    send_counts[i] = base_size + (i < remainder ? 1 : 0);
-    displs[i] = (i == 0) ? 0 : displs[i - 1] + send_counts[i - 1];
-  }
-
-  int local_size = send_counts[world_.rank()];
-  input_.resize(local_size);
-  output_.resize(local_size);
-
-  // Scatter data using boost::mpi with proper buffer handling
-  try {
-    if (local_size > 0) {
-      // Безопасная передача данных - используем правильную сигнатуру scatterv
-      if (world_.rank() == 0 && !original_data.empty()) {
-        boost::mpi::scatterv(world_, original_data.data(), send_counts, displs, input_.data(), local_size, 0);
-      } else {
-        boost::mpi::scatterv(world_, input_.data(), local_size, 0);
-      }
-    } else {
-      // Для процессов с пустыми данными
-      if (world_.rank() == 0) {
-        std::vector<int> empty_buffer(original_size_);
-        boost::mpi::scatterv(world_, empty_buffer.data(), send_counts, displs, static_cast<int*>(nullptr), 0, 0);
-      } else {
-        boost::mpi::scatterv(world_, static_cast<int*>(nullptr), 0, 0);
-      }
-    }
-  } catch (const std::exception& e) {
-    return false;
-  }
-
-  return true;
 }
 
 bool burykin_m_radix_all::RadixALL::ValidationImpl() {
-  if (!task_data) {
-    return false;
-  }
+  return world_.rank() != 0 || (task_data->inputs_count[0] == task_data->outputs_count[0]);
+}
 
-  // Проверяем базовые условия
-  if (task_data->inputs.empty() || task_data->outputs.empty() || task_data->inputs_count.empty() ||
-      task_data->outputs_count.empty()) {
-    return task_data->inputs.empty() && task_data->outputs.empty() && task_data->inputs_count.empty() &&
-           task_data->outputs_count.empty();
+bool burykin_m_radix_all::RadixALL::PreProcessingImpl() {
+  if (world_.rank() == 0) {
+    const unsigned int input_size = task_data->inputs_count[0];
+    auto* in_ptr = reinterpret_cast<int*>(task_data->inputs[0]);
+    input_ = std::vector<int>(in_ptr, in_ptr + input_size);
+    output_.reserve(input_.size());
   }
+  return true;
+}
 
-  return task_data->inputs_count[0] == task_data->outputs_count[0];
+void burykin_m_radix_all::RadixALL::Squash(boost::mpi::communicator& group) {
+  const auto numprocs = static_cast<std::size_t>(group.size());
+  for (std::size_t i = 1; i < numprocs; i *= 2) {
+    if (group.rank() % (2 * i) == 0) {
+      const int slave = group.rank() + static_cast<int>(i);
+      if (slave < static_cast<int>(numprocs)) {
+        int size{};
+        group.recv(int(slave), 0, size);
+
+        const std::size_t threshold = procchunk_.size();
+        procchunk_.resize(threshold + size);
+        group.recv(int(slave), 0, procchunk_.data() + threshold, size);
+
+        std::ranges::inplace_merge(procchunk_, procchunk_.begin() + std::int64_t(threshold));
+      }
+    } else if ((group.rank() % i) == 0) {
+      const int size = static_cast<int>(procchunk_.size());
+      const int master = group.rank() - static_cast<int>(i);
+      group.send(master, 0, size);
+      group.send(master, 0, procchunk_.data(), size);
+      break;
+    }
+  }
 }
 
 bool burykin_m_radix_all::RadixALL::RunImpl() {
-  // Handle empty input
-  if (original_size_ <= 0) {
-    output_.clear();
+  std::size_t totalsize{};
+  if (world_.rank() == 0) {
+    totalsize = input_.size();
+  }
+  boost::mpi::broadcast(world_, totalsize, 0);
+
+  if (totalsize == 0) {
     return true;
   }
 
-  // Single process - just radix sort locally
-  if (world_.size() == 1) {
-    if (input_.empty()) {
-      output_.clear();
-      return true;
-    }
+  const auto numprocs = std::min<std::size_t>(totalsize, world_.size());
+  procchunk_.resize(totalsize);
 
-    std::vector<int> a = input_;
-    std::vector<int> b(a.size());
-
-    // Radix sort для каждого байта (0, 8, 16, 24 бита)
-    for (int shift = 0; shift < 32; shift += 8) {
-      auto count = ComputeFrequency(a, shift);
-      auto index = ComputeIndices(count);
-      DistributeElements(a, b, index, shift);
-      std::swap(a, b);
-    }
-
-    output_ = a;
+  if (world_.rank() >= int(numprocs)) {
+    world_.split(1);
     return true;
   }
+  auto group = world_.split(0);
 
-  // Multiple processes: каждый процесс делает локальную радиксную сортировку
-  std::vector<int> a = input_;
-  std::vector<int> b;
+  // Distribute data among MPI processes
+  if (group.rank() == 0) {
+    std::span<int> input_span{input_.data(), input_.size()};
+    std::vector<std::span<int>> procchunks = Distribute(input_span, numprocs);
+    procchunk_.assign(procchunks[0].begin(), procchunks[0].end());
 
-  if (!a.empty()) {
-    b.resize(a.size());
-
-    // Локальная радиксная сортировка на каждом процессе
-    for (int shift = 0; shift < 32; shift += 8) {
-      auto count = ComputeFrequency(a, shift);
-      auto index = ComputeIndices(count);
-      DistributeElements(a, b, index, shift);
-      std::swap(a, b);
+    for (int i = 1; i < int(procchunks.size()); i++) {
+      const auto& chunk = procchunks[i];
+      const int chunksize = int(chunk.size());
+      group.send(i, 0, chunksize);
+      group.send(i, 0, chunk.data(), chunksize);
     }
+  } else {
+    int chunksize{};
+    group.recv(0, 0, chunksize);
+    procchunk_.resize(chunksize);
+    group.recv(0, 0, procchunk_.data(), chunksize);
   }
 
-  // Теперь у каждого процесса есть локально отсортированный массив
-  output_ = a;
+  // Sort local chunk using hybrid OpenMP approach
+  if (!procchunk_.empty()) {
+    // Determine optimal thread count
+    const auto numthreads = std::min<std::size_t>(procchunk_.size(), ppc::util::GetPPCNumThreads());
 
-  // Безопасное слияние с использованием коллективных операций MPI
-  std::vector<int> all_sizes;
-  int local_size = static_cast<int>(output_.size());
+    if (numthreads > 1 && procchunk_.size() > 64) {
+      // Parallel approach for larger chunks
+      std::span<int> chunk_span{procchunk_.data(), procchunk_.size()};
+      std::vector<std::span<int>> chunks = Distribute(chunk_span, numthreads);
 
-  try {
-    // Собираем размеры от всех процессов
-    boost::mpi::gather(world_, local_size, all_sizes, 0);
+      // Sort each subchunk in parallel using OpenMP
+#pragma omp parallel for
+      for (int i = 0; i < static_cast<int>(numthreads); i++) {
+        RadixSortInt(chunks[i]);
+      }
 
-    if (world_.rank() == 0) {
-      // Подготавливаем буферы для получения данных
-      std::vector<int> displs(world_.size(), 0);
-      int total_size = 0;
+      // Merge sorted subchunks
+      for (std::size_t i = 1; i < numthreads; i *= 2) {
+        const auto multithreaded = chunks.front().size() > 48;
+        const auto active_threads = numthreads - i;
 
-      for (int i = 0; i < world_.size(); ++i) {
-        if (i > 0) {
-          displs[i] = displs[i - 1] + all_sizes[i - 1];
+#pragma omp parallel for if (multithreaded)
+        for (int j = 0; j < static_cast<int>(active_threads); j += 2 * static_cast<int>(i)) {
+          auto& left = chunks[j];
+          auto& right = chunks[j + i];
+
+          std::inplace_merge(left.begin(), left.end(), right.end());
+          left = std::span{left.begin(), right.end()};
         }
-        total_size += all_sizes[i];
       }
-
-      std::vector<int> all_data(std::max(total_size, 1));  // Избегаем пустого буфера
-
-      // Используем gatherv для безопасного сбора данных
-      if (world_.rank() == 0) {
-        boost::mpi::gatherv(world_, output_.data(), local_size, all_data.data(), all_sizes, displs, 0);
-      } else {
-        // Для не-root процессов используем упрощенную версию
-        boost::mpi::gatherv(world_, output_.data(), local_size, 0);
-      }
-
-      // K-way merge отсортированных кусков
-      if (total_size > 0) {
-        output_ = PerformKWayMerge(all_data, all_sizes, displs);
-      } else {
-        output_.clear();
-      }
-
     } else {
-      // Отправляем данные процессу 0
-      boost::mpi::gatherv(world_, output_.data(), local_size, 0);
+      // Sequential radix sort for smaller chunks or single thread
+      std::vector<int> a = std::move(procchunk_);
+      std::vector<int> b(a.size());
+
+      for (int shift = 0; shift < 32; shift += 8) {
+        auto count = ComputeFrequency(a, shift);
+        const auto index = ComputeIndices(count);
+        DistributeElements(a, b, index, shift);
+        a.swap(b);
+      }
+
+      procchunk_ = std::move(a);
     }
-  } catch (const std::exception& e) {
-    return false;
   }
+
+  // Merge results from all MPI processes
+  Squash(group);
 
   return true;
 }
 
 bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
-  // Only root process writes output
   if (world_.rank() == 0) {
-    if (!task_data || task_data->outputs.empty()) {
-      return output_.empty();
-    }
-
     auto* output_ptr = reinterpret_cast<int*>(task_data->outputs[0]);
-    const auto output_size = static_cast<int>(output_.size());
+    const auto output_size = static_cast<int>(procchunk_.size());
 
-    // Безопасное копирование с проверкой размеров
-    if (output_size > 0 && output_ptr != nullptr) {
-      // Проверяем, что размер выходного буфера соответствует ожидаемому
-      if (task_data->outputs_count.empty() || static_cast<int>(task_data->outputs_count[0]) < output_size) {
-        return false;
-      }
-
-#pragma omp parallel for schedule(static) if (output_size > 1000)
-      for (int i = 0; i < output_size; ++i) {
-        output_ptr[i] = output_[i];
-      }
+// Parallelize copying results to output buffer
+#pragma omp parallel for
+    for (int i = 0; i < output_size; ++i) {
+      output_ptr[i] = procchunk_[i];
     }
   }
-
   return true;
 }
