@@ -3,6 +3,7 @@
 #include <array>
 #include <boost/mpi/collectives.hpp>
 #include <boost/mpi/communicator.hpp>
+#include <boost/mpi/environment.hpp>
 #include <utility>
 #include <vector>
 
@@ -12,7 +13,7 @@ namespace burykin_m_radix_all {
 
 class RadixALL : public ppc::core::Task {
  public:
-  explicit RadixALL(ppc::core::TaskDataPtr task_data) : Task(std::move(task_data)) {}
+  explicit RadixALL(ppc::core::TaskDataPtr task_data) : Task(std::move(task_data)), world_() {}
   bool PreProcessingImpl() override;
   bool ValidationImpl() override;
   bool RunImpl() override;
@@ -24,12 +25,10 @@ class RadixALL : public ppc::core::Task {
                                  const int shift);
   std::vector<int> PerformKWayMerge(const std::vector<int>& all_data, const std::vector<int>& sizes,
                                     const std::vector<int>& displs);
-  void Merge(boost::mpi::communicator& group);
 
  private:
-  int original_size_;
+  int original_size_ = 0;
   std::vector<int> input_, output_;
-  std::vector<int> procchunk_;
   boost::mpi::communicator world_;
 };
 
