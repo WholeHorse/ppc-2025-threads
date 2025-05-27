@@ -26,7 +26,7 @@ std::array<int, 256> burykin_m_radix_all::RadixALL::ComputeFrequency(const std::
     std::array<int, 256> local_count = {};
 
 #pragma omp for schedule(static) nowait
-    for (size_t i = 0; i < a.size(); ++i) {
+    for (int i = 0; i < a.size(); ++i) {
       const int v = a[i];
       unsigned int key = ((static_cast<unsigned int>(v) >> shift) & 0xFFU);
       if (shift == 24) {
@@ -75,7 +75,7 @@ void burykin_m_radix_all::RadixALL::DistributeElements(const std::vector<int>& a
     std::vector<std::vector<int>> local_buckets(256);
 
 #pragma omp for schedule(static) nowait
-    for (size_t i = 0; i < a.size(); ++i) {
+    for (int i = 0; i < a.size(); ++i) {
       const int v = a[i];
       unsigned int key = ((static_cast<unsigned int>(v) >> shift) & 0xFFU);
       if (shift == 24) {
