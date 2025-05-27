@@ -20,10 +20,14 @@ class RadixALL : public ppc::core::Task {
 
   static std::array<int, 256> ComputeFrequency(const std::vector<int>& a, int shift);
   static std::array<int, 256> ComputeIndices(const std::array<int, 256>& count);
-  static void DistributeElements(const std::vector<int>& a, std::vector<int>& b, std::array<int, 256> index, int shift);
+  static void DistributeElements(const std::vector<int>& a, std::vector<int>& b, std::array<int, 256> index,
+                                 const int shift);
+  std::vector<int> PerformKWayMerge(const std::vector<int>& all_data, const std::vector<int>& sizes,
+                                    const std::vector<int>& displs);
   void Merge(boost::mpi::communicator& group);
 
  private:
+  int original_size_;
   std::vector<int> input_, output_;
   std::vector<int> procchunk_;
   boost::mpi::communicator world_;
