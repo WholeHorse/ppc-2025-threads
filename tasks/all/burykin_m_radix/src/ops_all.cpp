@@ -44,16 +44,19 @@ void RadixSortInt(std::span<int> v) {
     for (const int val : a) {
       unsigned int key = ((static_cast<unsigned int>(val) >> shift) & 0xFFU);
       if (shift == 24) {
-        key ^= 0x80;
+        key ^= 0x80;  // Handle sign bit for proper sorting of negative numbers
       }
       ++count[key];
     }
 
-    // Compute indices
+    // Compute indices (prefix sum)
     std::array<int, 256> index = {0};
     for (int i = 1; i < 256; ++i) {
       index[i] = index[i - 1] + count[i - 1];
     }
+
+    // Create a copy of indices for distribution
+    std::array<int, 256> temp_index = index;
 
     // Distribute elements
     for (const int val : a) {
@@ -61,7 +64,7 @@ void RadixSortInt(std::span<int> v) {
       if (shift == 24) {
         key ^= 0x80;
       }
-      b[index[key]++] = val;
+      b[temp_index[key]++] = val;
     }
 
     a.swap(b);
@@ -254,14 +257,20 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
       }
     } else {
       // Sequential radix sort for smaller chunks or single thread
-      std::vector<int> a = std::move(procchunk_);
+      std::vector<int> a = procchunk_;
       std::vector<int> b(a.size());
 
-      for (int shift = 0; shift < 32; shift += 8) {
-        auto count = ComputeFrequency(a, shift);
-        const auto index = ComputeIndices(count);
-        DistributeElements(a, b, index, shift);
-        a.swap(b);
+#pragma omp parallel
+      {
+#pragma omp single
+        {
+          for (int shift = 0; shift < 32; shift += 8) {
+            auto count = ComputeFrequency(a, shift);
+            const auto index = ComputeIndices(count);
+            DistributeElements(a, b, index, shift);
+            a.swap(b);
+          }
+        }
       }
 
       procchunk_ = std::move(a);
