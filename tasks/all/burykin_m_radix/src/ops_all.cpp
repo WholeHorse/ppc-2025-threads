@@ -102,7 +102,7 @@ bool burykin_m_radix_all::RadixALL::PreProcessingImpl() {
   if (world_.rank() == 0) {
     std::span<int> src = {reinterpret_cast<int *>(task_data->inputs[0]), task_data->inputs_count[0]};
     input_.assign(src.begin(), src.end());
-    output_.reserve(input_.size());
+    output_.resize(input_.size());  // Изменено: используем resize вместо reserve
   }
   return true;
 }
@@ -149,90 +149,100 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
     return true;
   }
 
-  const auto numprocs = std::min<std::size_t>(totalsize, world_.size());
-
-  if (world_.rank() >= int(numprocs)) {
-    world_.split(1);
-    return true;
-  }
-
-  auto group = world_.split(0);
+  // Исправлено: убираем ограничение на количество процессов
+  const auto numprocs = static_cast<std::size_t>(world_.size());
 
   // Распределение данных между процессами
-  if (group.rank() == 0) {
+  if (world_.rank() == 0) {
     std::vector<std::span<int>> procchunks = Distribute(input_, numprocs);
     procchunk_.assign(procchunks[0].begin(), procchunks[0].end());
 
-    for (int i = 1; i < int(procchunks.size()); i++) {
+    for (int i = 1; i < static_cast<int>(numprocs); i++) {
       const auto &chunk = procchunks[i];
-      const int chunksize = int(chunk.size());
-      group.send(i, 0, chunksize);
+      const int chunksize = static_cast<int>(chunk.size());
+      world_.send(i, 0, chunksize);
       if (chunksize > 0) {
-        group.send(i, 0, chunk.data(), chunksize);
+        world_.send(i, 0, chunk.data(), chunksize);
       }
     }
   } else {
     int chunksize{};
-    group.recv(0, 0, chunksize);
+    world_.recv(0, 0, chunksize);
     procchunk_.resize(chunksize);
     if (chunksize > 0) {
-      group.recv(0, 0, procchunk_.data(), chunksize);
+      world_.recv(0, 0, procchunk_.data(), chunksize);
     }
   }
 
   // Локальная сортировка с использованием OpenMP
   if (!procchunk_.empty()) {
     const auto numthreads = std::min<std::size_t>(procchunk_.size(), ppc::util::GetPPCNumThreads());
-    std::vector<std::span<int>> chunks = Distribute(procchunk_, numthreads);
 
-    // Параллельная сортировка каждого chunk'а
+    if (numthreads == 1) {
+      // Если только один поток, просто сортируем весь chunk
+      RadixSort(procchunk_);
+    } else {
+      // Распределяем данные между потоками
+      std::vector<std::span<int>> chunks = Distribute(procchunk_, numthreads);
+
+      // Параллельная сортировка каждого chunk'а
 #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(numthreads); i++) {
-      RadixSort(chunks[i]);
-    }
-
-    // Слияние отсортированных chunk'ов
-    for (std::size_t step = 1; step < numthreads; step *= 2) {
-      const auto multithreaded = chunks.front().size() > 48;
-
-#pragma omp parallel for if (multithreaded)
-      for (int j = 0; j < static_cast<int>(numthreads); j += 2 * static_cast<int>(step)) {
-        const auto right_idx = j + static_cast<int>(step);
-        if (static_cast<std::size_t>(right_idx) < chunks.size()) {
-          auto &left = chunks[j];
-          auto &right = chunks[right_idx];
-
-          // Создаем временный буфер для слияния
-          std::vector<int> merged;
-          merged.reserve(left.size() + right.size());
-
-          // Сливаем два отсортированных диапазона
-          std::merge(left.begin(), left.end(), right.begin(), right.end(), std::back_inserter(merged));
-
-          // Копируем результат обратно в левый chunk
-          std::copy(merged.begin(), merged.end(), left.begin());
-
-          // Обновляем размер левого chunk'а
-          left = std::span{left.begin(), left.begin() + merged.size()};
+      for (int i = 0; i < static_cast<int>(numthreads); i++) {
+        if (!chunks[i].empty()) {
+          RadixSort(chunks[i]);
         }
       }
-    }
 
-    // Копируем окончательно отсортированный результат
-    if (!chunks.empty()) {
-      procchunk_.assign(chunks[0].begin(), chunks[0].end());
+      // Исправленное слияние отсортированных chunk'ов
+      std::vector<int> temp_buffer;
+      temp_buffer.reserve(procchunk_.size());
+
+      // Последовательное слияние всех chunk'ов
+      std::vector<int> merged_data;
+      merged_data.reserve(procchunk_.size());
+
+      // Начинаем с первого непустого chunk'а
+      size_t start_idx = 0;
+      while (start_idx < chunks.size() && chunks[start_idx].empty()) {
+        start_idx++;
+      }
+
+      if (start_idx < chunks.size()) {
+        merged_data.assign(chunks[start_idx].begin(), chunks[start_idx].end());
+
+        // Сливаем остальные chunk'ы
+        for (size_t i = start_idx + 1; i < chunks.size(); i++) {
+          if (!chunks[i].empty()) {
+            temp_buffer.clear();
+            temp_buffer.reserve(merged_data.size() + chunks[i].size());
+
+            std::merge(merged_data.begin(), merged_data.end(), chunks[i].begin(), chunks[i].end(),
+                       std::back_inserter(temp_buffer));
+
+            merged_data = std::move(temp_buffer);
+          }
+        }
+
+        // Копируем результат обратно
+        procchunk_ = std::move(merged_data);
+      }
     }
   }
 
   // Сбор результатов от всех процессов
-  Squash(group);
+  Squash(world_);
 
   return true;
 }
 
 bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
   if (world_.rank() == 0) {
-    std::ranges::copy(procchunk_, reinterpret_cast<int *>(task_data->outputs[0]));
+    // Исправлено: добавляем проверку размера и инициализируем output_
+    if (output_.size() != procchunk_.size()) {
+      output_.resize(procchunk_.size());
+    }
+    std::ranges::copy(procchunk_, output_.begin());
+    std::ranges::copy(output_, reinterpret_cast<int *>(task_data->outputs[0]));
   }
   return true;
 }
