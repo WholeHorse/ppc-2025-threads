@@ -15,7 +15,7 @@
 constexpr double kAbsErr = 0.5;
 
 namespace {
-void MuradovMRectIntTest(std::size_t iterations, std::vector<std::pair<double, double>> bounds, double ref,
+void MuradovMRectIntTest(int iterations, std::vector<std::pair<double, double>> bounds, double ref,
                          const muradov_m_rect_int_stl::Matfun &fun) {
   double out = 0.0;
   auto task_data = std::make_shared<ppc::core::TaskData>();

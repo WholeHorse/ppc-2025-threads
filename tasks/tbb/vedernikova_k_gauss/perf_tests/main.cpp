@@ -15,7 +15,7 @@ namespace {
 using Pars = std::tuple<uint32_t, uint32_t, uint32_t, uint8_t>;
 
 TEST(vedernikova_k_gauss_test_tbb, test_pipeline_run) {
-  const auto &[width, height, channels, brightness] = Pars(500, 500, 4, 128);
+  const auto &[width, height, channels, brightness] = Pars(1000, 300, 4, 128);
   const uint32_t size = width * height * channels;
   std::vector<uint8_t> in(size, brightness);
   std::vector<uint8_t> out(size);

@@ -25,37 +25,43 @@ int Orientation(const shulpin_i_jarvis_all::Point& p, const shulpin_i_jarvis_all
 shulpin_i_jarvis_all::Point FindLocalCandidate(const shulpin_i_jarvis_all::Point& current,
                                                const std::vector<shulpin_i_jarvis_all::Point>& points,
                                                int num_threads) {
-  std::vector<shulpin_i_jarvis_all::Point> local_cand(num_threads, points.front());
+  std::vector<shulpin_i_jarvis_all::Point> local_cand(num_threads);
 
   auto worker = [&](int tid) {
     size_t chunk = points.size() / num_threads;
     size_t start = tid * chunk;
     size_t end = (tid == num_threads - 1 ? points.size() : start + chunk);
-    shulpin_i_jarvis_all::Point& candidate = local_cand[tid];
-    for (size_t i = start; i < end; ++i) {
-      const auto& p = points[i];
-      if (p == current) {
-        continue;
+
+    shulpin_i_jarvis_all::Point candidate;
+    if (start < end) {
+      candidate = points[start];
+      for (size_t i = start; i < end; ++i) {
+        const auto& p = points[i];
+        if (p == current) {
+          continue;
+        }
+        double cross =
+            ((p.y - current.y) * (candidate.x - current.x)) - ((p.x - current.x) * (candidate.y - current.y));
+        double d_p = std::pow(p.x - current.x, 2) + std::pow(p.y - current.y, 2);
+        double d_c = std::pow(candidate.x - current.x, 2) + std::pow(candidate.y - current.y, 2);
+        if (cross > 0 || (cross == 0 && d_p > d_c)) {
+          candidate = p;
+        }
       }
-      double cross = ((p.y - current.y) * (candidate.x - current.x)) - ((p.x - current.x) * (candidate.y - current.y));
-      double d_p = std::pow(p.x - current.x, 2) + std::pow(p.y - current.y, 2);
-      double d_c = std::pow(candidate.x - current.x, 2) + std::pow(candidate.y - current.y, 2);
-      if (cross > 0 || (cross == 0 && d_p > d_c)) {
-        candidate = p;
-      }
+    } else {
+      candidate = current;
     }
+
+    local_cand[tid] = candidate;
   };
 
   std::vector<std::thread> threads;
   threads.reserve(num_threads);
-
   for (int t = 0; t < num_threads; ++t) {
     threads.emplace_back(worker, t);
   }
   for (auto& th : threads) {
-    if (th.joinable()) {
-      th.join();
-    }
+    th.join();
   }
 
   shulpin_i_jarvis_all::Point best = local_cand[0];

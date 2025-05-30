@@ -34,14 +34,17 @@ class CCSALL : public ppc::core::Task {
   static int CalculateStartIndex(int index, const std::vector<int>& columns_sum);
   void GetDisplacements();
   void CollectSizes();
+  void CollectData();
+  void AddData(const std::vector<double>& data, int past_data, int index);
 
   Sparse A_;
   Sparse B_;
   Sparse Answer_;
   Sparse Process_data_;
+  int resize_data_;
   boost::mpi::communicator world_;
   std::vector<int> displ_;
-  std::vector<int> elements_sizes_;
+  std::vector<double> sending_data_;
   std::vector<int> sum_sizes_;
 
  public:

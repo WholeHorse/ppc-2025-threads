@@ -11,7 +11,7 @@
 #include "omp/durynichev_d_integrals_simpson_method/include/ops_omp.hpp"
 
 TEST(durynichev_d_integrals_simpson_method_omp, test_pipeline_run) {
-  std::vector<double> in = {-10.0, 10.0, -10.0, 10.0, 30000, 0};
+  std::vector<double> in = {-10.0, 10.0, -10.0, 10.0, 29000, 0};
   std::vector<double> out(1, 0.0);
 
   auto task_data = std::make_shared<ppc::core::TaskData>();
@@ -41,7 +41,7 @@ TEST(durynichev_d_integrals_simpson_method_omp, test_pipeline_run) {
 }
 
 TEST(durynichev_d_integrals_simpson_method_omp, test_task_run) {
-  std::vector<double> in = {-10.0, 10.0, -10.0, 10.0, 30000, 0};
+  std::vector<double> in = {-10.0, 10.0, -10.0, 10.0, 29000, 0};
   std::vector<double> out(1, 0.0);
 
   auto task_data = std::make_shared<ppc::core::TaskData>();

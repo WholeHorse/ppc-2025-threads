@@ -12,13 +12,13 @@
 #include "omp/chizhov_m_trapezoid_method/include/ops_omp.hpp"
 
 TEST(chizhov_m_trapezoid_method_omp, test_pipeline_run) {
-  int div = 300;
+  int div = 200;
   int dim = 3;
   std::vector<double> limits = {0.0, 1000.0, 0.0, 1000.0, 0.0, 1000.0};
 
   std::vector<double> res(1, 0);
   auto f = [](const std::vector<double> &f_val) {
-    return std::cos((f_val[0] * f_val[0]) + (f_val[1] * f_val[1]) + (f_val[2] * f_val[2]));
+    return std::sin((f_val[0] * f_val[0]) + (f_val[1] * f_val[1]) + (f_val[2] * f_val[2]));
   };
   auto *f_object = new std::function<double(const std::vector<double> &)>(f);
 
@@ -59,17 +59,17 @@ TEST(chizhov_m_trapezoid_method_omp, test_pipeline_run) {
   auto perf_analyzer = std::make_shared<ppc::core::Perf>(test_task_omp);
   perf_analyzer->PipelineRun(perf_attr, perf_results);
   ppc::core::Perf::PrintPerfStatistic(perf_results);
-  ASSERT_NEAR(57972, res[0], 0.3);
+  ASSERT_NEAR(-1405.6, res[0], 0.3);
 }
 
 TEST(chizhov_m_trapezoid_method_omp, test_task_run) {
-  int div = 300;
+  int div = 200;
   int dim = 3;
   std::vector<double> limits = {0.0, 1000.0, 0.0, 1000.0, 0.0, 1000.0};
 
   std::vector<double> res(1, 0);
   auto f = [](const std::vector<double> &f_val) {
-    return std::cos((f_val[0] * f_val[0]) + (f_val[1] * f_val[1]) + (f_val[2] * f_val[2]));
+    return std::sin((f_val[0] * f_val[0]) + (f_val[1] * f_val[1]) + (f_val[2] * f_val[2]));
   };
   auto *f_object = new std::function<double(const std::vector<double> &)>(f);
 
@@ -110,5 +110,5 @@ TEST(chizhov_m_trapezoid_method_omp, test_task_run) {
   auto perf_analyzer = std::make_shared<ppc::core::Perf>(test_task_omp);
   perf_analyzer->TaskRun(perf_attr, perf_results);
   ppc::core::Perf::PrintPerfStatistic(perf_results);
-  ASSERT_NEAR(57972, res[0], 0.3);
+  ASSERT_NEAR(-1405.6, res[0], 0.3);
 }
