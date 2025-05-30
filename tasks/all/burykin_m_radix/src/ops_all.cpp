@@ -180,7 +180,7 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
 
 #pragma omp parallel for if (multithreaded)
       for (int j = 0; j < static_cast<int>(active_threads); j += 2 * static_cast<int>(i)) {
-        if (j + i < static_cast<int>(chunks.size())) {
+        if (static_cast<std::size_t>(j + i) < chunks.size()) {
           auto &left = chunks[j];
           auto &right = chunks[j + i];
 
