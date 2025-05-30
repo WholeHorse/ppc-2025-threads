@@ -51,17 +51,30 @@ void RadixSort(std::span<int> v) {
 
   std::array<std::size_t, kBase> count;
 
+  // Указатели на текущий и вспомогательный массивы
+  std::span<int> current = v;
+  std::span<int> temp = aux;
+
   for (std::size_t ib = 0; ib < Bytes<int>(); ++ib) {
     std::ranges::fill(count, 0);
 
-    std::ranges::for_each(v, [&](auto el) { ++count[Bitutil::ByteAt(Bitutil::AsU32(el), ib)]; });
+    // Подсчет элементов для текущего байта
+    std::ranges::for_each(current, [&](auto el) { ++count[Bitutil::ByteAt(Bitutil::AsU32(el), ib)]; });
 
+    // Преобразование в префиксные суммы
     std::partial_sum(count.begin(), count.end(), count.begin());
 
-    std::ranges::for_each(std::ranges::reverse_view(v),
-                          [&](auto el) { aux[--count[Bitutil::ByteAt(Bitutil::AsU32(el), ib)]] = el; });
+    // Распределение элементов во временный массив (в обратном порядке для стабильности)
+    std::ranges::for_each(std::ranges::reverse_view(current),
+                          [&](auto el) { temp[--count[Bitutil::ByteAt(Bitutil::AsU32(el), ib)]] = el; });
 
-    std::swap(v, aux);
+    // Меняем местами указатели
+    std::swap(current, temp);
+  }
+
+  // Если результат находится не в исходном массиве, копируем его обратно
+  if (current.data() != v.data()) {
+    std::ranges::copy(current, v.begin());
   }
 }
 
@@ -109,6 +122,7 @@ void burykin_m_radix_all::RadixALL::Squash(boost::mpi::communicator &group) {
           procchunk_.resize(threshold + size);
           group.recv(int(slave), 0, procchunk_.data() + threshold, size);
 
+          // Слияние отсортированных частей
           std::ranges::inplace_merge(procchunk_, procchunk_.begin() + std::int64_t(threshold));
         }
       }
@@ -144,6 +158,7 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
 
   auto group = world_.split(0);
 
+  // Распределение данных между процессами
   if (group.rank() == 0) {
     std::vector<std::span<int>> procchunks = Distribute(input_, numprocs);
     procchunk_.assign(procchunks[0].begin(), procchunks[0].end());
@@ -165,42 +180,51 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
     }
   }
 
+  // Локальная сортировка с использованием OpenMP
   if (!procchunk_.empty()) {
     const auto numthreads = std::min<std::size_t>(procchunk_.size(), ppc::util::GetPPCNumThreads());
     std::vector<std::span<int>> chunks = Distribute(procchunk_, numthreads);
 
+    // Параллельная сортировка каждого chunk'а
 #pragma omp parallel for
     for (int i = 0; i < static_cast<int>(numthreads); i++) {
       RadixSort(chunks[i]);
     }
 
-    for (std::size_t i = 1; i < numthreads; i *= 2) {
+    // Слияние отсортированных chunk'ов
+    for (std::size_t step = 1; step < numthreads; step *= 2) {
       const auto multithreaded = chunks.front().size() > 48;
-      const auto active_threads = numthreads - i;
 
 #pragma omp parallel for if (multithreaded)
-      for (int j = 0; j < static_cast<int>(active_threads); j += 2 * static_cast<int>(i)) {
-        if (static_cast<std::size_t>(j + i) < chunks.size()) {
+      for (int j = 0; j < static_cast<int>(numthreads); j += 2 * static_cast<int>(step)) {
+        const auto right_idx = j + static_cast<int>(step);
+        if (static_cast<std::size_t>(right_idx) < chunks.size()) {
           auto &left = chunks[j];
-          auto &right = chunks[j + i];
+          auto &right = chunks[right_idx];
 
+          // Создаем временный буфер для слияния
           std::vector<int> merged;
           merged.reserve(left.size() + right.size());
 
+          // Сливаем два отсортированных диапазона
           std::merge(left.begin(), left.end(), right.begin(), right.end(), std::back_inserter(merged));
 
+          // Копируем результат обратно в левый chunk
           std::copy(merged.begin(), merged.end(), left.begin());
 
+          // Обновляем размер левого chunk'а
           left = std::span{left.begin(), left.begin() + merged.size()};
         }
       }
     }
 
+    // Копируем окончательно отсортированный результат
     if (!chunks.empty()) {
       procchunk_.assign(chunks[0].begin(), chunks[0].end());
     }
   }
 
+  // Сбор результатов от всех процессов
   Squash(group);
 
   return true;
