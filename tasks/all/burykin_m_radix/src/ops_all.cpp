@@ -64,22 +64,7 @@ void RadixSort(std::span<int> v) {
     std::swap(v, aux);
   }
 }
-}  // namespace
 
-bool burykin_m_radix_all::RadixALL::ValidationImpl() {
-  return world_.rank() != 0 || (task_data->inputs_count[0] == task_data->outputs_count[0]);
-}
-
-bool burykin_m_radix_all::RadixALL::PreProcessingImpl() {
-  if (world_.rank() == 0) {
-    std::span<int> src = {reinterpret_cast<int *>(task_data->inputs[0]), task_data->inputs_count[0]};
-    input_.assign(src.begin(), src.end());
-    output_.reserve(input_.size());
-  }
-  return true;
-}
-
-namespace {
 std::vector<std::span<int>> Distribute(std::span<int> arr, std::size_t n) {
   std::vector<std::span<int>> chunks(n);
   const std::size_t delta = arr.size() / n;
@@ -95,6 +80,19 @@ std::vector<std::span<int>> Distribute(std::span<int> arr, std::size_t n) {
   return chunks;
 }
 }  // namespace
+
+bool burykin_m_radix_all::RadixALL::ValidationImpl() {
+  return world_.rank() != 0 || (task_data->inputs_count[0] == task_data->outputs_count[0]);
+}
+
+bool burykin_m_radix_all::RadixALL::PreProcessingImpl() {
+  if (world_.rank() == 0) {
+    std::span<int> src = {reinterpret_cast<int *>(task_data->inputs[0]), task_data->inputs_count[0]};
+    input_.assign(src.begin(), src.end());
+    output_.reserve(input_.size());
+  }
+  return true;
+}
 
 void burykin_m_radix_all::RadixALL::Squash(boost::mpi::communicator &group) {
   const auto numprocs = static_cast<std::size_t>(group.size());
@@ -138,12 +136,12 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
   }
 
   const auto numprocs = std::min<std::size_t>(totalsize, world_.size());
-  procchunk_.resize(totalsize);
 
   if (world_.rank() >= int(numprocs)) {
     world_.split(1);
     return true;
   }
+
   auto group = world_.split(0);
 
   if (group.rank() == 0) {
@@ -182,12 +180,24 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
 
 #pragma omp parallel for if (multithreaded)
       for (int j = 0; j < static_cast<int>(active_threads); j += 2 * static_cast<int>(i)) {
-        auto &left = chunks[j];
-        auto &right = chunks[j + i];
+        if (j + i < static_cast<int>(chunks.size())) {
+          auto &left = chunks[j];
+          auto &right = chunks[j + i];
 
-        std::inplace_merge(left.begin(), left.end(), right.end());
-        left = std::span{left.begin(), right.end()};
+          std::vector<int> merged;
+          merged.reserve(left.size() + right.size());
+
+          std::merge(left.begin(), left.end(), right.begin(), right.end(), std::back_inserter(merged));
+
+          std::copy(merged.begin(), merged.end(), left.begin());
+
+          left = std::span{left.begin(), left.begin() + merged.size()};
+        }
       }
+    }
+
+    if (!chunks.empty()) {
+      procchunk_.assign(chunks[0].begin(), chunks[0].end());
     }
   }
 
