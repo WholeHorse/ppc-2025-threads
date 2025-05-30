@@ -1,5 +1,7 @@
 #include "../include/ops_all.hpp"
 
+#include <omp.h>
+
 #include <algorithm>
 #include <array>
 #include <boost/mpi/communicator.hpp>
@@ -92,6 +94,43 @@ std::vector<std::span<int>> Distribute(std::span<int> arr, std::size_t n) {
 
   return chunks;
 }
+
+// Безопасное слияние отсортированных массивов
+void SafeMerge(std::vector<int> &target, const std::vector<std::vector<int>> &sorted_chunks) {
+  if (sorted_chunks.empty()) return;
+
+  // Фильтруем непустые чанки
+  std::vector<const std::vector<int> *> non_empty_chunks;
+  for (const auto &chunk : sorted_chunks) {
+    if (!chunk.empty()) {
+      non_empty_chunks.push_back(&chunk);
+    }
+  }
+
+  if (non_empty_chunks.empty()) {
+    target.clear();
+    return;
+  }
+
+  if (non_empty_chunks.size() == 1) {
+    target = *non_empty_chunks[0];
+    return;
+  }
+
+  // Последовательное слияние чанков
+  target = *non_empty_chunks[0];
+
+  for (size_t i = 1; i < non_empty_chunks.size(); ++i) {
+    std::vector<int> temp;
+    temp.reserve(target.size() + non_empty_chunks[i]->size());
+
+    std::merge(target.begin(), target.end(), non_empty_chunks[i]->begin(), non_empty_chunks[i]->end(),
+               std::back_inserter(temp));
+
+    target = std::move(temp);
+  }
+}
+
 }  // namespace
 
 bool burykin_m_radix_all::RadixALL::ValidationImpl() {
@@ -102,7 +141,7 @@ bool burykin_m_radix_all::RadixALL::PreProcessingImpl() {
   if (world_.rank() == 0) {
     std::span<int> src = {reinterpret_cast<int *>(task_data->inputs[0]), task_data->inputs_count[0]};
     input_.assign(src.begin(), src.end());
-    output_.resize(input_.size());  // Изменено: используем resize вместо reserve
+    output_.resize(input_.size());
   }
   return true;
 }
@@ -118,12 +157,19 @@ void burykin_m_radix_all::RadixALL::Squash(boost::mpi::communicator &group) {
         group.recv(int(slave), 0, size);
 
         if (size > 0) {
-          const std::size_t threshold = procchunk_.size();
-          procchunk_.resize(threshold + size);
-          group.recv(int(slave), 0, procchunk_.data() + threshold, size);
+          std::vector<int> received_data(size);
+          group.recv(int(slave), 0, received_data.data(), size);
 
-          // Слияние отсортированных частей
-          std::ranges::inplace_merge(procchunk_, procchunk_.begin() + std::int64_t(threshold));
+          // Создаем временный буфер для слияния
+          std::vector<int> merged_result;
+          merged_result.reserve(procchunk_.size() + received_data.size());
+
+          // Сливаем отсортированные массивы
+          std::merge(procchunk_.begin(), procchunk_.end(), received_data.begin(), received_data.end(),
+                     std::back_inserter(merged_result));
+
+          // Заменяем procchunk_ результатом слияния
+          procchunk_ = std::move(merged_result);
         }
       }
     } else if ((group.rank() % i) == 0) {
@@ -149,7 +195,6 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
     return true;
   }
 
-  // Исправлено: убираем ограничение на количество процессов
   const auto numprocs = static_cast<std::size_t>(world_.size());
 
   // Распределение данных между процессами
@@ -176,56 +221,42 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
 
   // Локальная сортировка с использованием OpenMP
   if (!procchunk_.empty()) {
-    const auto numthreads = std::min<std::size_t>(procchunk_.size(), ppc::util::GetPPCNumThreads());
+    const auto available_threads = std::min<std::size_t>(procchunk_.size(), ppc::util::GetPPCNumThreads());
 
-    if (numthreads == 1) {
+    // Ограничиваем количество потоков для стабильности
+    const auto numthreads = std::min(available_threads, std::size_t(8));
+
+    if (numthreads <= 1) {
       // Если только один поток, просто сортируем весь chunk
       RadixSort(procchunk_);
     } else {
       // Распределяем данные между потоками
       std::vector<std::span<int>> chunks = Distribute(procchunk_, numthreads);
 
-      // Параллельная сортировка каждого chunk'а
-#pragma omp parallel for
-      for (int i = 0; i < static_cast<int>(numthreads); i++) {
+      // Создаем отдельные векторы для каждого потока
+      std::vector<std::vector<int>> thread_results(numthreads);
+
+      // Инициализируем векторы результатов
+      for (size_t i = 0; i < numthreads; ++i) {
         if (!chunks[i].empty()) {
-          RadixSort(chunks[i]);
+          thread_results[i].assign(chunks[i].begin(), chunks[i].end());
         }
       }
 
-      // Исправленное слияние отсортированных chunk'ов
-      std::vector<int> temp_buffer;
-      temp_buffer.reserve(procchunk_.size());
-
-      // Последовательное слияние всех chunk'ов
-      std::vector<int> merged_data;
-      merged_data.reserve(procchunk_.size());
-
-      // Начинаем с первого непустого chunk'а
-      size_t start_idx = 0;
-      while (start_idx < chunks.size() && chunks[start_idx].empty()) {
-        start_idx++;
-      }
-
-      if (start_idx < chunks.size()) {
-        merged_data.assign(chunks[start_idx].begin(), chunks[start_idx].end());
-
-        // Сливаем остальные chunk'ы
-        for (size_t i = start_idx + 1; i < chunks.size(); i++) {
-          if (!chunks[i].empty()) {
-            temp_buffer.clear();
-            temp_buffer.reserve(merged_data.size() + chunks[i].size());
-
-            std::merge(merged_data.begin(), merged_data.end(), chunks[i].begin(), chunks[i].end(),
-                       std::back_inserter(temp_buffer));
-
-            merged_data = std::move(temp_buffer);
-          }
+// Параллельная сортировка каждого chunk'а
+#pragma omp parallel for num_threads(static_cast<int>(numthreads)) schedule(static)
+      for (int i = 0; i < static_cast<int>(numthreads); i++) {
+        if (!thread_results[i].empty()) {
+          std::span<int> thread_span{thread_results[i]};
+          RadixSort(thread_span);
         }
-
-        // Копируем результат обратно
-        procchunk_ = std::move(merged_data);
       }
+
+// Барьер для синхронизации потоков
+#pragma omp barrier
+
+      // Последовательное слияние всех отсортированных chunk'ов
+      SafeMerge(procchunk_, thread_results);
     }
   }
 
@@ -237,12 +268,16 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
 
 bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
   if (world_.rank() == 0) {
-    // Исправлено: добавляем проверку размера и инициализируем output_
+    // Проверяем корректность размеров
     if (output_.size() != procchunk_.size()) {
       output_.resize(procchunk_.size());
     }
-    std::ranges::copy(procchunk_, output_.begin());
-    std::ranges::copy(output_, reinterpret_cast<int *>(task_data->outputs[0]));
+
+    // Копируем результат
+    if (!procchunk_.empty()) {
+      std::ranges::copy(procchunk_, output_.begin());
+      std::ranges::copy(output_, reinterpret_cast<int *>(task_data->outputs[0]));
+    }
   }
   return true;
 }
