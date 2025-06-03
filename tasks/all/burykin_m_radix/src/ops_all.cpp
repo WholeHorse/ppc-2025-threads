@@ -258,9 +258,7 @@ std::vector<int> burykin_m_radix_all::RadixALL::DistributeData(const std::vector
 
     // Send chunks to other processes
     for (int i = 1; i < size; i++) {
-      if (!chunks[i].empty()) {
-        world_.send(i, 0, chunks[i]);
-      }
+      world_.send(i, 0, chunks[i]);
     }
 
     local_data = std::move(chunks[0]);
