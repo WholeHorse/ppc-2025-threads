@@ -46,19 +46,59 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
     return true;
   }
 
-  // Distribute data among processes
-  local_data_ = DistributeData(input_, rank, size);
+  // Broadcast the entire array to all processes first
+  std::vector<int> global_data;
+  if (rank == 0) {
+    global_data = input_;
+  } else {
+    global_data.resize(array_size);
+  }
+  boost::mpi::broadcast(world_, global_data, 0);
 
-  // Perform local radix sort using OpenMP
-  if (!local_data_.empty()) {
-    RadixSortLocal(local_data_);
+  // Split into positive and negative numbers
+  std::vector<int> negatives;
+  std::vector<int> positives;
+  SplitBySign(global_data, negatives, positives);
+
+  // Process negatives and positives separately
+  std::vector<int> sorted_negatives;
+  std::vector<int> sorted_positives;
+
+  // Sort negatives
+  if (!negatives.empty()) {
+    local_data_ = DistributeData(negatives, rank, size);
+    if (!local_data_.empty()) {
+      RadixSortPositive(local_data_);  // Sort absolute values
+    }
+    if (rank == 0) {
+      sorted_negatives = GatherAndMerge(local_data_, rank, size);
+      // Reverse order and make negative
+      std::ranges::reverse(sorted_negatives);
+      std::ranges::transform(sorted_negatives, sorted_negatives.begin(), [](int x) { return -x; });
+    } else {
+      GatherAndMerge(local_data_, rank, size);
+    }
   }
 
-  // Gather and merge results
+  // Sort positives
+  if (!positives.empty()) {
+    local_data_ = DistributeData(positives, rank, size);
+    if (!local_data_.empty()) {
+      RadixSortPositive(local_data_);
+    }
+    if (rank == 0) {
+      sorted_positives = GatherAndMerge(local_data_, rank, size);
+    } else {
+      GatherAndMerge(local_data_, rank, size);
+    }
+  }
+
+  // Merge results on rank 0
   if (rank == 0) {
-    output_ = GatherAndMerge(local_data_, rank, size);
-  } else {
-    GatherAndMerge(local_data_, rank, size);
+    output_.clear();
+    output_.reserve(sorted_negatives.size() + sorted_positives.size());
+    output_.insert(output_.end(), sorted_negatives.begin(), sorted_negatives.end());
+    output_.insert(output_.end(), sorted_positives.begin(), sorted_positives.end());
   }
 
   return true;
@@ -72,35 +112,20 @@ bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
 }
 
 void burykin_m_radix_all::RadixALL::RadixSortLocal(std::vector<int>& arr) {
+  // This method is now replaced by the logic in RunImpl
+  RadixSortPositive(arr);
+}
+
+// New method for sorting only positive numbers
+void burykin_m_radix_all::RadixALL::RadixSortPositive(std::vector<int>& arr) {
   if (arr.empty()) {
     return;
   }
 
-  std::vector<int> negatives;
-  std::vector<int> positives;
-  SplitBySign(arr, negatives, positives);
-
-  // Sort negatives (as positive numbers, then reverse and negate)
-  if (!negatives.empty()) {
-    int max_neg = *std::ranges::max_element(negatives);
-    for (int exp = 1; max_neg / exp > 0; exp *= 10) {
-      CountingSortByDigit(negatives, exp);
-    }
-    // Reverse and negate
-    std::ranges::reverse(negatives);
-    std::ranges::transform(negatives, negatives.begin(), std::negate<int>{});
+  int max_val = *std::ranges::max_element(arr);
+  for (int exp = 1; max_val / exp > 0; exp *= 10) {
+    CountingSortByDigit(arr, exp);
   }
-
-  // Sort positives
-  if (!positives.empty()) {
-    int max_pos = *std::ranges::max_element(positives);
-    for (int exp = 1; max_pos / exp > 0; exp *= 10) {
-      CountingSortByDigit(positives, exp);
-    }
-  }
-
-  // Merge results
-  MergeResults(arr, negatives, positives);
 }
 
 void burykin_m_radix_all::RadixALL::CountingSortByDigit(std::vector<int>& arr, int exp) {
@@ -145,7 +170,7 @@ void burykin_m_radix_all::RadixALL::SplitBySign(const std::vector<int>& arr, std
 
   for (int num : arr) {
     if (num < 0) {
-      negatives.push_back(-num);  // Store as positive for easier sorting
+      negatives.push_back(-num);  // Store as positive for radix sort
     } else {
       positives.push_back(num);
     }
@@ -228,7 +253,8 @@ std::vector<int> burykin_m_radix_all::RadixALL::MergeTwoSorted(const std::vector
   std::vector<int> result;
   result.reserve(left.size() + right.size());
 
-  size_t i = 0, j = 0;
+  size_t i = 0;
+  size_t j = 0;
 
   // Merge the two sorted arrays
   while (i < left.size() && j < right.size()) {

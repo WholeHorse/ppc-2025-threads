@@ -25,6 +25,7 @@ class RadixALL : public ppc::core::Task {
   // Core radix sort functions
   static void RadixSortLocal(std::vector<int>& arr);
   static void CountingSortByDigit(std::vector<int>& arr, int exp);
+  static void RadixSortPositive(std::vector<int>& arr);
 
   // Helper functions for signed integers
   static void SplitBySign(const std::vector<int>& arr, std::vector<int>& negatives, std::vector<int>& positives);
