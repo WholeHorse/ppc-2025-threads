@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <boost/mpi/communicator.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -23,6 +24,13 @@ std::vector<int> GenerateRandomVector(size_t size, int min_val = -1000, int max_
   return vec;
 }
 
+void CompareResults(const std::vector<int>& expected, const std::vector<int>& out) {
+  boost::mpi::communicator world;
+  if (world.rank() == 0) {
+    EXPECT_EQ(expected, out);
+  }
+}
+
 }  // namespace
 
 TEST(burykin_m_radix_all, AlreadySorted) {
@@ -42,7 +50,7 @@ TEST(burykin_m_radix_all, AlreadySorted) {
   task.Run();
   task.PostProcessing();
 
-  EXPECT_EQ(output, expected);
+  CompareResults(expected, output);
 }
 
 TEST(burykin_m_radix_all, ReverseSorted) {
@@ -63,7 +71,7 @@ TEST(burykin_m_radix_all, ReverseSorted) {
   task.Run();
   task.PostProcessing();
 
-  EXPECT_EQ(output, expected);
+  CompareResults(expected, output);
 }
 
 TEST(burykin_m_radix_all, RandomVector) {
@@ -85,7 +93,7 @@ TEST(burykin_m_radix_all, RandomVector) {
   task.Run();
   task.PostProcessing();
 
-  EXPECT_EQ(output, expected);
+  CompareResults(expected, output);
 }
 
 TEST(burykin_m_radix_all, AllEqual) {
@@ -106,7 +114,7 @@ TEST(burykin_m_radix_all, AllEqual) {
   task.Run();
   task.PostProcessing();
 
-  EXPECT_EQ(output, expected);
+  CompareResults(expected, output);
 }
 
 TEST(burykin_m_radix_all, EmptyVector) {
@@ -126,5 +134,5 @@ TEST(burykin_m_radix_all, EmptyVector) {
   task.Run();
   task.PostProcessing();
 
-  EXPECT_EQ(output, expected);
+  CompareResults(expected, output);
 }
