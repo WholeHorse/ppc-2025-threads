@@ -22,6 +22,8 @@ class RadixALL : public ppc::core::Task {
   std::vector<int> local_data_;
   boost::mpi::communicator world_;
 
+  // Core radix sort functions
+  static void RadixSortLocal(std::vector<int>& arr);
   static void CountingSortByDigit(std::vector<int>& arr, int exp);
   static void RadixSortPositive(std::vector<int>& arr);
 

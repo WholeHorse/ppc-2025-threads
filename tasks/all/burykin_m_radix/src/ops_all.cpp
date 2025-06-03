@@ -156,6 +156,11 @@ bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
   return true;
 }
 
+void burykin_m_radix_all::RadixALL::RadixSortLocal(std::vector<int>& arr) {
+  // This method is now replaced by the logic in RunImpl
+  RadixSortPositive(arr);
+}
+
 // New method for sorting only positive numbers
 void burykin_m_radix_all::RadixALL::RadixSortPositive(std::vector<int>& arr) {
   if (arr.empty()) {
