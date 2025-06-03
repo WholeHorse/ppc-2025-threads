@@ -144,14 +144,14 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
 
 bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
   // Ensure all processes have the same output size
-  // if (world_.rank() == 0) {
-  //   std::cerr << "[DEBUG] output_: ";
-  //   for (int x : output_) {
-  //     std::cerr << x << " ";
-  //   }
-  //   std::cerr << '\n';
-  //   std::memcpy(task_data->outputs[0], output_.data(), output_.size() * sizeof(int));
-  // }
+  if (world_.rank() == 0) {
+    //   std::cerr << "[DEBUG] output_: ";
+    //   for (int x : output_) {
+    //     std::cerr << x << " ";
+    //   }
+    //   std::cerr << '\n';
+    std::memcpy(task_data->outputs[0], output_.data(), output_.size() * sizeof(int));
+  }
 
   return true;
 }
