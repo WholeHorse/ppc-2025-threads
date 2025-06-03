@@ -230,15 +230,20 @@ std::vector<int> burykin_m_radix_all::RadixALL::DistributeData(const std::vector
 std::vector<int> burykin_m_radix_all::RadixALL::GatherAndMerge(const std::vector<int>& local_sorted, int rank,
                                                                int size) {
   if (rank == 0) {
+    // Initialize vector of vectors with proper size
     std::vector<std::vector<int>> all_chunks(size);
-    all_chunks[0] = local_sorted;
+    all_chunks[0] = local_sorted;  // Copy local_sorted to first chunk
 
     // Receive sorted chunks from other processes
     for (int i = 1; i < size; i++) {
-      world_.recv(i, 0, all_chunks[i]);
+      std::vector<int> received_chunk;
+      world_.recv(i, 0, received_chunk);  // Receive into temporary vector
+      if (!received_chunk.empty()) {
+        all_chunks[i] = std::move(received_chunk);  // Move valid data to all_chunks
+      }
     }
 
-    // Merge all sorted chunks
+    // Merge all non-empty sorted chunks
     std::vector<int> result;
     for (const auto& chunk : all_chunks) {
       if (!chunk.empty()) {
@@ -252,7 +257,7 @@ std::vector<int> burykin_m_radix_all::RadixALL::GatherAndMerge(const std::vector
     if (!local_sorted.empty()) {
       world_.send(0, 0, local_sorted);
     }
-    return {};
+    return std::vector<int>{};  // Explicitly return empty vector
   }
 }
 
