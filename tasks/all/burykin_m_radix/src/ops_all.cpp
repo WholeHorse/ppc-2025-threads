@@ -189,6 +189,10 @@ void burykin_m_radix_all::RadixALL::MergeResults(std::vector<int>& result, const
 std::vector<int> burykin_m_radix_all::RadixALL::DistributeData(const std::vector<int>& data, int rank, int size) {
   std::vector<int> local_data;
 
+  if (data.empty()) {
+    return local_data;  // Return immediately if data is empty
+  }
+
   if (rank == 0) {
     // Calculate chunk sizes
     const size_t chunk_size = data.size() / size;
@@ -209,7 +213,9 @@ std::vector<int> burykin_m_radix_all::RadixALL::DistributeData(const std::vector
 
     // Send chunks to other processes
     for (int i = 1; i < size; i++) {
-      world_.send(i, 0, chunks[i]);
+      if (!chunks[i].empty()) {
+        world_.send(i, 0, chunks[i]);
+      }
     }
 
     local_data = std::move(chunks[0]);
@@ -233,17 +239,19 @@ std::vector<int> burykin_m_radix_all::RadixALL::GatherAndMerge(const std::vector
     }
 
     // Merge all sorted chunks
-    std::vector<int> result = all_chunks[0];
-    for (int i = 1; i < size; i++) {
-      if (!all_chunks[i].empty()) {
-        result = MergeTwoSorted(result, all_chunks[i]);
+    std::vector<int> result;
+    for (const auto& chunk : all_chunks) {
+      if (!chunk.empty()) {
+        result = result.empty() ? chunk : MergeTwoSorted(result, chunk);
       }
     }
 
     return result;
   } else {
     // Send local sorted data to rank 0
-    world_.send(0, 0, local_sorted);
+    if (!local_sorted.empty()) {
+      world_.send(0, 0, local_sorted);
+    }
     return {};
   }
 }
