@@ -27,6 +27,16 @@ bool burykin_m_radix_all::RadixALL::PreProcessingImpl() {
                               reinterpret_cast<int*>(task_data->inputs[0]) + task_data->inputs_count[0]);
     output_.resize(input_.size());
   }
+
+  // Broadcast the input vector size to all processes
+  if (world_.rank() == 0) {
+    std::cerr << "[DEBUG] input_: ";
+    for (int x : input_) {
+      std::cerr << x << " ";
+    }
+    std::cerr << '\n';
+  }
+
   return true;
 }
 
@@ -59,6 +69,20 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
   std::vector<int> negatives;
   std::vector<int> positives;
   SplitBySign(global_data, negatives, positives);
+
+  // Debug output for negatives and positives
+  if (rank == 0) {
+    std::cerr << "[DEBUG] negatives: ";
+    for (int x : negatives) {
+      std::cerr << x << " ";
+    }
+    std::cerr << '\n';
+    std::cerr << "[DEBUG] positives: ";
+    for (int x : positives) {
+      std::cerr << x << " ";
+    }
+    std::cerr << '\n';
+  }
 
   // Process negatives and positives separately
   std::vector<int> sorted_negatives;
@@ -93,6 +117,20 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
     }
   }
 
+  // Debug output for sorted arrays
+  if (rank == 0) {
+    std::cerr << "[DEBUG] sorted_negatives: ";
+    for (int x : sorted_negatives) {
+      std::cerr << x << " ";
+    }
+    std::cerr << '\n';
+    std::cerr << "[DEBUG] sorted_positives: ";
+    for (int x : sorted_positives) {
+      std::cerr << x << " ";
+    }
+    std::cerr << '\n';
+  }
+
   // Merge results on rank 0
   if (rank == 0) {
     output_.clear();
@@ -105,9 +143,16 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
 }
 
 bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
+  // Ensure all processes have the same output size
   if (world_.rank() == 0) {
+    std::cerr << "[DEBUG] output_: ";
+    for (int x : output_) {
+      std::cerr << x << " ";
+    }
+    std::cerr << '\n';
     std::ranges::copy(output_, reinterpret_cast<int*>(task_data->outputs[0]));
   }
+
   return true;
 }
 
