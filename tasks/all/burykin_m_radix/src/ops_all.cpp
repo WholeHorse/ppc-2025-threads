@@ -150,7 +150,7 @@ bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
       std::cerr << x << " ";
     }
     std::cerr << '\n';
-    std::ranges::copy(output_, reinterpret_cast<int*>(task_data->outputs[0]));
+    std::memcpy(task_data->outputs[0], output_.data(), output_.size() * sizeof(int));
   }
 
   return true;
