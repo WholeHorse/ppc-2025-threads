@@ -88,33 +88,31 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
   std::vector<int> sorted_negatives;
   std::vector<int> sorted_positives;
 
-  // Sort negatives
-  if (!negatives.empty()) {
-    local_data_ = DistributeData(negatives, rank, size);
-    if (!local_data_.empty()) {
-      RadixSortPositive(local_data_);  // Sort absolute values
-    }
-    if (rank == 0) {
-      sorted_negatives = GatherAndMerge(local_data_, rank, size);
+  // Sort negatives - ALL processes participate
+  local_data_ = DistributeData(negatives, rank, size);
+  if (!local_data_.empty()) {
+    RadixSortPositive(local_data_);  // Sort absolute values
+  }
+  if (rank == 0) {
+    sorted_negatives = GatherAndMerge(local_data_, rank, size);
+    if (!sorted_negatives.empty()) {
       // Reverse order and make negative
       std::ranges::reverse(sorted_negatives);
       std::ranges::transform(sorted_negatives, sorted_negatives.begin(), [](int x) { return -x; });
-    } else {
-      GatherAndMerge(local_data_, rank, size);
     }
+  } else {
+    GatherAndMerge(local_data_, rank, size);
   }
 
-  // Sort positives
-  if (!positives.empty()) {
-    local_data_ = DistributeData(positives, rank, size);
-    if (!local_data_.empty()) {
-      RadixSortPositive(local_data_);
-    }
-    if (rank == 0) {
-      sorted_positives = GatherAndMerge(local_data_, rank, size);
-    } else {
-      GatherAndMerge(local_data_, rank, size);
-    }
+  // Sort positives - ALL processes participate
+  local_data_ = DistributeData(positives, rank, size);
+  if (!local_data_.empty()) {
+    RadixSortPositive(local_data_);
+  }
+  if (rank == 0) {
+    sorted_positives = GatherAndMerge(local_data_, rank, size);
+  } else {
+    GatherAndMerge(local_data_, rank, size);
   }
 
   // Debug output for sorted arrays
@@ -143,7 +141,6 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
 }
 
 bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
-  // Ensure all processes have the same output size
   if (world_.rank() == 0) {
     //   std::cerr << "[DEBUG] output_: ";
     //   for (int x : output_) {
@@ -156,12 +153,8 @@ bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
   return true;
 }
 
-void burykin_m_radix_all::RadixALL::RadixSortLocal(std::vector<int>& arr) {
-  // This method is now replaced by the logic in RunImpl
-  RadixSortPositive(arr);
-}
+void burykin_m_radix_all::RadixALL::RadixSortLocal(std::vector<int>& arr) { RadixSortPositive(arr); }
 
-// New method for sorting only positive numbers
 void burykin_m_radix_all::RadixALL::RadixSortPositive(std::vector<int>& arr) {
   if (arr.empty()) {
     return;
@@ -178,7 +171,6 @@ void burykin_m_radix_all::RadixALL::CountingSortByDigit(std::vector<int>& arr, i
   std::vector<int> output(n);
   std::vector<int> count(10, 0);
 
-// Count occurrences of each digit using OpenMP
 #pragma omp parallel
   {
     std::vector<int> local_count(10, 0);
@@ -196,10 +188,8 @@ void burykin_m_radix_all::RadixALL::CountingSortByDigit(std::vector<int>& arr, i
     }
   }
 
-  // Transform count array to cumulative sum
   std::partial_sum(count.begin(), count.end(), count.begin());
 
-  // Build output array from right to left
   for (int i = n - 1; i >= 0; i--) {
     int digit = (arr[i] / exp) % 10;
     output[--count[digit]] = arr[i];
@@ -234,36 +224,35 @@ void burykin_m_radix_all::RadixALL::MergeResults(std::vector<int>& result, const
 std::vector<int> burykin_m_radix_all::RadixALL::DistributeData(const std::vector<int>& data, int rank, int size) {
   std::vector<int> local_data;
 
-  if (data.empty()) {
-    return local_data;  // Return immediately if data is empty
-  }
-
+  // ALL processes participate in distribution
   if (rank == 0) {
     // Calculate chunk sizes
-    const size_t chunk_size = data.size() / size;
-    const size_t remainder = data.size() % size;
+    const size_t chunk_size = data.empty() ? 0 : data.size() / size;
+    const size_t remainder = data.empty() ? 0 : data.size() % size;
 
     std::vector<std::vector<int>> chunks(size);
 
-    size_t start = 0;
-    for (int i = 0; i < size; i++) {
-      size_t current_chunk_size = chunk_size + (i < static_cast<int>(remainder) ? 1 : 0);
-      size_t end = start + current_chunk_size;
+    if (!data.empty()) {
+      size_t start = 0;
+      for (int i = 0; i < size; i++) {
+        size_t current_chunk_size = chunk_size + (i < static_cast<int>(remainder) ? 1 : 0);
+        size_t end = start + current_chunk_size;
 
-      if (current_chunk_size > 0) {
-        chunks[i].assign(data.begin() + start, data.begin() + end);
+        if (current_chunk_size > 0 && end <= data.size()) {
+          chunks[i].assign(data.begin() + start, data.begin() + end);
+        }
+        start = end;
       }
-      start = end;
     }
 
-    // Send chunks to other processes
+    // Send chunks to ALL other processes (even if empty)
     for (int i = 1; i < size; i++) {
       world_.send(i, 0, chunks[i]);
     }
 
     local_data = std::move(chunks[0]);
   } else {
-    // Receive chunk from rank 0
+    // ALL non-root processes receive (even if empty)
     world_.recv(0, 0, local_data);
   }
 
@@ -273,34 +262,37 @@ std::vector<int> burykin_m_radix_all::RadixALL::DistributeData(const std::vector
 std::vector<int> burykin_m_radix_all::RadixALL::GatherAndMerge(const std::vector<int>& local_sorted, int rank,
                                                                int size) {
   if (rank == 0) {
-    // Initialize vector of vectors with proper size
-    std::vector<std::vector<int>> all_chunks(size);
-    all_chunks[0] = local_sorted;  // Copy local_sorted to first chunk
+    // Initialize with proper capacity to avoid null pointer issues
+    std::vector<std::vector<int>> all_chunks;
+    all_chunks.reserve(size);
 
-    // Receive sorted chunks from other processes
+    // Add rank 0's data first
+    all_chunks.push_back(local_sorted);
+
+    // Receive from ALL other processes
     for (int i = 1; i < size; i++) {
       std::vector<int> received_chunk;
-      world_.recv(i, 0, received_chunk);  // Receive into temporary vector
-      if (!received_chunk.empty()) {
-        all_chunks[i] = std::move(received_chunk);  // Move valid data to all_chunks
-      }
+      world_.recv(i, 0, received_chunk);
+      all_chunks.push_back(std::move(received_chunk));
     }
 
-    // Merge all non-empty sorted chunks
+    // Merge all chunks (including empty ones)
     std::vector<int> result;
     for (const auto& chunk : all_chunks) {
       if (!chunk.empty()) {
-        result = result.empty() ? chunk : MergeTwoSorted(result, chunk);
+        if (result.empty()) {
+          result = chunk;
+        } else {
+          result = MergeTwoSorted(result, chunk);
+        }
       }
     }
 
     return result;
   } else {
-    // Send local sorted data to rank 0
-    if (!local_sorted.empty()) {
-      world_.send(0, 0, local_sorted);
-    }
-    return std::vector<int>{};  // Explicitly return empty vector
+    // ALL non-root processes send their data
+    world_.send(0, 0, local_sorted);
+    return std::vector<int>();  // Return empty vector for non-root
   }
 }
 
@@ -312,7 +304,6 @@ std::vector<int> burykin_m_radix_all::RadixALL::MergeTwoSorted(const std::vector
   size_t i = 0;
   size_t j = 0;
 
-  // Merge the two sorted arrays
   while (i < left.size() && j < right.size()) {
     if (left[i] <= right[j]) {
       result.push_back(left[i++]);
@@ -321,7 +312,6 @@ std::vector<int> burykin_m_radix_all::RadixALL::MergeTwoSorted(const std::vector
     }
   }
 
-  // Add remaining elements
   while (i < left.size()) {
     result.push_back(left[i++]);
   }
