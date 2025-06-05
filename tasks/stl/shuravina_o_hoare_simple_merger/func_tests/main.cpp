@@ -5,9 +5,9 @@
 #include <vector>
 
 #include "core/task/include/task.hpp"
-#include "stl/shuravina_o_hoare_simple_merger_std/include/ops_stl.hpp"
+#include "stl/shuravina_o_hoare_simple_merger/include/ops_stl.hpp"
 
-TEST(shuravina_o_hoare_simple_merger_stl, test_sort) {
+TEST(shuravina_o_hoare_simple_merger, test_sort) {
   std::vector<int> in = {5, 2, 9, 1, 5, 6};
   std::vector<int> out(in.size(), 0);
 
@@ -17,7 +17,7 @@ TEST(shuravina_o_hoare_simple_merger_stl, test_sort) {
   task_data->outputs.emplace_back(reinterpret_cast<uint8_t*>(out.data()));
   task_data->outputs_count.emplace_back(out.size());
 
-  auto test_task = std::make_shared<shuravina_o_hoare_simple_merger_stl::TestTaskSTL>(task_data);
+  auto test_task = std::make_shared<shuravina_o_hoare_simple_merger::TestTaskSTL>(task_data);
 
   EXPECT_TRUE(test_task->Validation());
   EXPECT_TRUE(test_task->PreProcessing());
@@ -28,7 +28,7 @@ TEST(shuravina_o_hoare_simple_merger_stl, test_sort) {
   EXPECT_EQ(out, expected);
 }
 
-TEST(shuravina_o_hoare_simple_merger_stl, test_empty_array) {
+TEST(shuravina_o_hoare_simple_merger, test_empty_array) {
   std::vector<int> in = {};
   std::vector<int> out = {};
 
@@ -48,7 +48,7 @@ TEST(shuravina_o_hoare_simple_merger_stl, test_empty_array) {
   task_data->outputs_count.emplace_back(out.size());
 }
 
-TEST(shuravina_o_hoare_simple_merger_stl, test_sorted_array) {
+TEST(shuravina_o_hoare_simple_merger, test_sorted_array) {
   std::vector<int> in = {1, 2, 3, 4, 5};
   std::vector<int> out(in.size(), 0);
 
@@ -58,7 +58,7 @@ TEST(shuravina_o_hoare_simple_merger_stl, test_sorted_array) {
   task_data->outputs.emplace_back(reinterpret_cast<uint8_t*>(out.data()));
   task_data->outputs_count.emplace_back(out.size());
 
-  auto test_task = std::make_shared<shuravina_o_hoare_simple_merger_stl::TestTaskSTL>(task_data);
+  auto test_task = std::make_shared<shuravina_o_hoare_simple_merger::TestTaskSTL>(task_data);
 
   EXPECT_TRUE(test_task->Validation());
   EXPECT_TRUE(test_task->PreProcessing());

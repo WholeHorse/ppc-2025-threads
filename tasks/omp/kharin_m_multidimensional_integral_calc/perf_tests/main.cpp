@@ -33,7 +33,7 @@ TEST(kharin_m_multidimensional_integral_calc_omp, test_pipeline_run) {
       std::make_shared<kharin_m_multidimensional_integral_calc_omp::TestTaskOpenMP>(task_data_seq);
 
   auto perf_attr = std::make_shared<ppc::core::PerfAttr>();
-  perf_attr->num_running = 30;  // Количество запусков для усреднения
+  perf_attr->num_running = 30;
   const double t0 = omp_get_wtime();
   perf_attr->current_timer = [t0] { return omp_get_wtime() - t0; };
 
@@ -69,7 +69,7 @@ TEST(kharin_m_multidimensional_integral_calc_omp, test_task_run) {
       std::make_shared<kharin_m_multidimensional_integral_calc_omp::TestTaskOpenMP>(task_data_seq);
 
   auto perf_attr = std::make_shared<ppc::core::PerfAttr>();
-  perf_attr->num_running = 30;  // Количество запусков для усреднения
+  perf_attr->num_running = 30;
   const double t0 = omp_get_wtime();
   perf_attr->current_timer = [t0] { return omp_get_wtime() - t0; };
 

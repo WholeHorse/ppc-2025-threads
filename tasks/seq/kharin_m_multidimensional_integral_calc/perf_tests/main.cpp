@@ -33,7 +33,7 @@ TEST(kharin_m_multidimensional_integral_calc_seq, test_pipeline_run) {
       std::make_shared<kharin_m_multidimensional_integral_calc_seq::TaskSequential>(task_data_seq);
 
   auto perf_attr = std::make_shared<ppc::core::PerfAttr>();
-  perf_attr->num_running = 10;  // Количество запусков для усреднения
+  perf_attr->num_running = 30;
   const auto t0 = std::chrono::high_resolution_clock::now();
   perf_attr->current_timer = [&] {
     auto current_time_point = std::chrono::high_resolution_clock::now();
@@ -73,7 +73,7 @@ TEST(kharin_m_multidimensional_integral_calc_seq, test_task_run) {
       std::make_shared<kharin_m_multidimensional_integral_calc_seq::TaskSequential>(task_data_seq);
 
   auto perf_attr = std::make_shared<ppc::core::PerfAttr>();
-  perf_attr->num_running = 10;  // Количество запусков для усреднения
+  perf_attr->num_running = 30;
   const auto t0 = std::chrono::high_resolution_clock::now();
   perf_attr->current_timer = [&] {
     auto current_time_point = std::chrono::high_resolution_clock::now();

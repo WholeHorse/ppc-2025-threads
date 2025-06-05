@@ -3,7 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
-#include <stl/shuravina_o_hoare_simple_merger_std/include/ops_stl.hpp>
+#include <stl/shuravina_o_hoare_simple_merger/include/ops_stl.hpp>
 #include <vector>
 
 #include "core/perf/include/perf.hpp"
@@ -24,7 +24,7 @@ TEST(shuravina_o_hoare_simple_merger_stl, test_pipeline_run) {
   task_data->outputs.emplace_back(reinterpret_cast<uint8_t*>(out.data()));
   task_data->outputs_count.emplace_back(out.size());
 
-  auto test_task = std::make_shared<shuravina_o_hoare_simple_merger_stl::TestTaskSTL>(task_data);
+  auto test_task = std::make_shared<shuravina_o_hoare_simple_merger::TestTaskSTL>(task_data);
 
   auto perf_attr = std::make_shared<ppc::core::PerfAttr>();
   perf_attr->num_running = 10;
@@ -60,7 +60,7 @@ TEST(shuravina_o_hoare_simple_merger_stl, test_task_run) {
   task_data->outputs.emplace_back(reinterpret_cast<uint8_t*>(out.data()));
   task_data->outputs_count.emplace_back(out.size());
 
-  auto test_task = std::make_shared<shuravina_o_hoare_simple_merger_stl::TestTaskSTL>(task_data);
+  auto test_task = std::make_shared<shuravina_o_hoare_simple_merger::TestTaskSTL>(task_data);
 
   auto perf_attr = std::make_shared<ppc::core::PerfAttr>();
   perf_attr->num_running = 10;
