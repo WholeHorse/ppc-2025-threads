@@ -107,8 +107,6 @@ bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
   return true;
 }
 
-void burykin_m_radix_all::RadixALL::RadixSortLocal(std::vector<int>& arr) { RadixSortPositive(arr); }
-
 void burykin_m_radix_all::RadixALL::RadixSortPositive(std::vector<int>& arr) {
   if (arr.empty()) {
     return;
@@ -164,15 +162,6 @@ void burykin_m_radix_all::RadixALL::SplitBySign(const std::vector<int>& arr, std
       positives.push_back(num);
     }
   }
-}
-
-void burykin_m_radix_all::RadixALL::MergeResults(std::vector<int>& result, const std::vector<int>& negatives,
-                                                 const std::vector<int>& positives) {
-  result.clear();
-  result.reserve(negatives.size() + positives.size());
-
-  result.insert(result.end(), negatives.begin(), negatives.end());
-  result.insert(result.end(), positives.begin(), positives.end());
 }
 
 std::vector<int> burykin_m_radix_all::RadixALL::DistributeData(const std::vector<int>& data, int rank, int size) {
