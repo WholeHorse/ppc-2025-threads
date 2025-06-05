@@ -78,7 +78,7 @@ TEST(burykin_m_radix_all, test_pipeline_run) {
 TEST(burykin_m_radix_all, test_task_run) {
   boost::mpi::communicator world;
 
-  constexpr size_t kNumElements = 10000000;
+  constexpr size_t kNumElements = 100000000;
 
   std::vector<int> input;
   std::vector<int> expected;
