@@ -27,7 +27,6 @@ bool burykin_m_radix_all::RadixALL::PreProcessingImpl() {
                               reinterpret_cast<int*>(task_data->inputs[0]) + task_data->inputs_count[0]);
     output_.resize(input_.size());
   }
-
   return true;
 }
 
@@ -42,58 +41,23 @@ bool burykin_m_radix_all::RadixALL::RunImpl() {
   }
   boost::mpi::broadcast(world_, array_size, 0);
 
-  // Handle empty array case
   if (array_size == 0) {
     return true;
   }
 
-  // Split data on rank 0 and distribute directly
-  std::vector<int> negatives;
-  std::vector<int> positives;
-  if (rank == 0) {
-    SplitBySign(input_, negatives, positives);
-  }
-
-  // Distribute negatives and positives separately to all processes
-  local_data_ = DistributeData(negatives, rank, size);
-  std::vector<int> local_positives = DistributeData(positives, rank, size);
+  // Distribute data using scatter approach
+  local_data_ = DistributeData(input_, rank, size);
 
   // Sort local data
-  std::vector<int> sorted_local_negatives;
-  std::vector<int> sorted_local_positives;
-
   if (!local_data_.empty()) {
-    RadixSortPositive(local_data_);
-    sorted_local_negatives = local_data_;
+    RadixSortLocal(local_data_);
   }
 
-  if (!local_positives.empty()) {
-    RadixSortPositive(local_positives);
-    sorted_local_positives = local_positives;
-  }
-
-  // Gather results
-  std::vector<int> sorted_negatives;
-  std::vector<int> sorted_positives;
-
+  // Gather and merge results using tree-based approach
   if (rank == 0) {
-    sorted_negatives = GatherAndMerge(sorted_local_negatives, rank, size);
-    sorted_positives = GatherAndMerge(sorted_local_positives, rank, size);
-
-    // Process negatives (reverse and negate)
-    if (!sorted_negatives.empty()) {
-      std::ranges::reverse(sorted_negatives);
-      std::ranges::transform(sorted_negatives, sorted_negatives.begin(), [](int x) { return -x; });
-    }
-
-    // Combine results
-    output_.clear();
-    output_.reserve(sorted_negatives.size() + sorted_positives.size());
-    output_.insert(output_.end(), sorted_negatives.begin(), sorted_negatives.end());
-    output_.insert(output_.end(), sorted_positives.begin(), sorted_positives.end());
+    output_ = GatherAndMerge(local_data_, rank, size);
   } else {
-    GatherAndMerge(sorted_local_negatives, rank, size);
-    GatherAndMerge(sorted_local_positives, rank, size);
+    GatherAndMerge(local_data_, rank, size);
   }
 
   return true;
@@ -103,18 +67,89 @@ bool burykin_m_radix_all::RadixALL::PostProcessingImpl() {
   if (world_.rank() == 0) {
     std::memcpy(task_data->outputs[0], output_.data(), output_.size() * sizeof(int));
   }
-
   return true;
 }
 
-void burykin_m_radix_all::RadixALL::RadixSortLocal(std::vector<int>& arr) { RadixSortPositive(arr); }
+void burykin_m_radix_all::RadixALL::RadixSortLocal(std::vector<int>& arr) {
+  if (arr.empty()) {
+    return;
+  }
+
+  // Separate negative and positive numbers in parallel
+  std::vector<int> negatives;
+  std::vector<int> positives;
+
+#pragma omp parallel
+  {
+    std::vector<int> local_neg;
+    std::vector<int> local_pos;
+
+#pragma omp for nowait
+    for (int i = 0; i < static_cast<int>(arr.size()); ++i) {
+      if (arr[i] < 0) {
+        local_neg.push_back(-arr[i]);  // Store as positive
+      } else {
+        local_pos.push_back(arr[i]);
+      }
+    }
+
+#pragma omp critical
+    {
+      negatives.insert(negatives.end(), local_neg.begin(), local_neg.end());
+      positives.insert(positives.end(), local_pos.begin(), local_pos.end());
+    }
+  }
+
+// Sort both parts in parallel
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      if (!negatives.empty()) {
+        RadixSortPositive(negatives);
+        // Reverse and negate for correct order
+        std::reverse(negatives.begin(), negatives.end());
+#pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(negatives.size()); ++i) {
+          negatives[i] = -negatives[i];
+        }
+      }
+    }
+
+#pragma omp section
+    {
+      if (!positives.empty()) {
+        RadixSortPositive(positives);
+      }
+    }
+  }
+
+  // Merge results
+  arr.clear();
+  arr.reserve(negatives.size() + positives.size());
+  arr.insert(arr.end(), negatives.begin(), negatives.end());
+  arr.insert(arr.end(), positives.begin(), positives.end());
+}
 
 void burykin_m_radix_all::RadixALL::RadixSortPositive(std::vector<int>& arr) {
   if (arr.empty()) {
     return;
   }
 
-  int max_val = *std::ranges::max_element(arr);
+  // Find maximum value in parallel
+  int max_val = 0;
+#pragma omp parallel
+  {
+    int local_max = 0;
+#pragma omp for
+    for (int i = 0; i < static_cast<int>(arr.size()); ++i) {
+      local_max = std::max(arr[i], local_max);
+    }
+#pragma omp critical
+    { max_val = std::max(local_max, max_val); }
+  }
+
+  // Process each digit position
   for (int exp = 1; max_val / exp > 0; exp *= 10) {
     CountingSortByDigit(arr, exp);
   }
@@ -125,87 +160,76 @@ void burykin_m_radix_all::RadixALL::CountingSortByDigit(std::vector<int>& arr, i
   std::vector<int> output(n);
   std::vector<int> count(10, 0);
 
+  // Parallel counting with thread-local counters
+  const int num_threads = omp_get_max_threads();
+  std::vector<std::vector<int>> thread_counts(num_threads, std::vector<int>(10, 0));
+
 #pragma omp parallel
   {
-    std::vector<int> local_count(10, 0);
+    const int tid = omp_get_thread_num();
 
-#pragma omp for
+#pragma omp for schedule(static)
     for (int i = 0; i < n; i++) {
-      local_count[(arr[i] / exp) % 10]++;
-    }
-
-#pragma omp critical
-    {
-      for (int i = 0; i < 10; i++) {
-        count[i] += local_count[i];
-      }
+      const int digit = (arr[i] / exp) % 10;
+      thread_counts[tid][digit]++;
     }
   }
 
+  // Merge thread counts
+  for (int t = 0; t < num_threads; ++t) {
+    for (int d = 0; d < 10; ++d) {
+      count[d] += thread_counts[t][d];
+    }
+  }
+
+  // Convert to cumulative counts
   std::partial_sum(count.begin(), count.end(), count.begin());
 
+  // Build output array
   for (int i = n - 1; i >= 0; i--) {
-    int digit = (arr[i] / exp) % 10;
+    const int digit = (arr[i] / exp) % 10;
     output[--count[digit]] = arr[i];
   }
 
   arr = std::move(output);
 }
 
-void burykin_m_radix_all::RadixALL::SplitBySign(const std::vector<int>& arr, std::vector<int>& negatives,
-                                                std::vector<int>& positives) {
-  negatives.clear();
-  positives.clear();
-
-  for (int num : arr) {
-    if (num < 0) {
-      negatives.push_back(-num);  // Store as positive for radix sort
-    } else {
-      positives.push_back(num);
-    }
-  }
-}
-
-void burykin_m_radix_all::RadixALL::MergeResults(std::vector<int>& result, const std::vector<int>& negatives,
-                                                 const std::vector<int>& positives) {
-  result.clear();
-  result.reserve(negatives.size() + positives.size());
-
-  result.insert(result.end(), negatives.begin(), negatives.end());
-  result.insert(result.end(), positives.begin(), positives.end());
-}
-
 std::vector<int> burykin_m_radix_all::RadixALL::DistributeData(const std::vector<int>& data, int rank, int size) {
   std::vector<int> local_data;
+  std::vector<int> send_counts(size);
+  std::vector<int> displs(size);
 
   if (rank == 0) {
-    // Calculate chunk sizes
-    const size_t chunk_size = data.empty() ? 0 : data.size() / size;
-    const size_t remainder = data.empty() ? 0 : data.size() % size;
+    // Calculate optimal distribution
+    const size_t total_size = data.size();
+    const size_t base_chunk = total_size / size;
+    const size_t remainder = total_size % size;
 
-    std::vector<std::vector<int>> chunks(size);
+    size_t offset = 0;
+    for (int i = 0; i < size; ++i) {
+      send_counts[i] = static_cast<int>(base_chunk + (i < static_cast<int>(remainder) ? 1 : 0));
+      displs[i] = static_cast<int>(offset);
+      offset += send_counts[i];
+    }
+  }
 
-    if (!data.empty()) {
-      size_t start = 0;
-      for (int i = 0; i < size; i++) {
-        size_t current_chunk_size = chunk_size + (i < static_cast<int>(remainder) ? 1 : 0);
-        size_t end = start + current_chunk_size;
+  // Broadcast distribution info
+  boost::mpi::broadcast(world_, send_counts, 0);
 
-        if (current_chunk_size > 0 && end <= data.size()) {
-          chunks[i].assign(data.begin() + static_cast<ptrdiff_t>(start), data.begin() + static_cast<ptrdiff_t>(end));
-        }
-        start = end;
+  // Resize local buffer
+  local_data.resize(send_counts[rank]);
+
+  // Scatter data efficiently
+  if (rank == 0) {
+    for (int i = 0; i < size; ++i) {
+      if (i == 0) {
+        std::copy(data.begin(), data.begin() + send_counts[0], local_data.begin());
+      } else {
+        std::vector<int> chunk(data.begin() + displs[i], data.begin() + displs[i] + send_counts[i]);
+        world_.send(i, 0, chunk);
       }
     }
-
-    // Send chunks to other processes (even if empty)
-    for (int i = 1; i < size; i++) {
-      world_.send(i, 0, chunks[i]);
-    }
-
-    local_data = std::move(chunks[0]);
   } else {
-    // Non-root processes always receive their chunk (may be empty)
     world_.recv(0, 0, local_data);
   }
 
@@ -214,48 +238,43 @@ std::vector<int> burykin_m_radix_all::RadixALL::DistributeData(const std::vector
 
 std::vector<int> burykin_m_radix_all::RadixALL::GatherAndMerge(const std::vector<int>& local_sorted, int rank,
                                                                int size) {
-  if (rank == 0) {
-    std::vector<std::vector<int>> all_chunks;
-    all_chunks.reserve(size);
+  std::vector<int> current_data = local_sorted;
 
-    // Add rank 0's data first
-    all_chunks.push_back(local_sorted);
-
-    // Receive from other processes
-    for (int i = 1; i < size; i++) {
-      std::vector<int> received_chunk;
-      world_.recv(i, 0, received_chunk);
-      all_chunks.push_back(std::move(received_chunk));
-    }
-
-    // Merge all chunks
-    std::vector<int> result;
-    for (const auto& chunk : all_chunks) {
-      if (!chunk.empty()) {
-        if (result.empty()) {
-          result = chunk;
-        } else {
-          result = MergeTwoSorted(result, chunk);
-        }
+  // Tree-based reduction for better scalability
+  for (int step = 1; step < size; step *= 2) {
+    if (rank % (2 * step) == 0) {
+      // Receiver
+      int sender = rank + step;
+      if (sender < size) {
+        std::vector<int> received_data;
+        world_.recv(sender, 0, received_data);
+        current_data = MergeTwoSorted(current_data, received_data);
       }
+    } else if (rank % step == 0) {
+      // Sender
+      int receiver = rank - step;
+      world_.send(receiver, 0, current_data);
+      break;
     }
-
-    return result;
   }
 
-  // Non-root processes send their data
-  world_.send(0, 0, local_sorted);
-  return {};
+  return current_data;
 }
 
 std::vector<int> burykin_m_radix_all::RadixALL::MergeTwoSorted(const std::vector<int>& left,
                                                                const std::vector<int>& right) {
+  if (left.empty()) {
+    return right;
+  }
+  if (right.empty()) {
+    return left;
+  }
+
   std::vector<int> result;
   result.reserve(left.size() + right.size());
 
   size_t i = 0;
   size_t j = 0;
-
   while (i < left.size() && j < right.size()) {
     if (left[i] <= right[j]) {
       result.push_back(left[i++]);
@@ -272,4 +291,26 @@ std::vector<int> burykin_m_radix_all::RadixALL::MergeTwoSorted(const std::vector
   }
 
   return result;
+}
+
+void burykin_m_radix_all::RadixALL::SplitBySign(const std::vector<int>& arr, std::vector<int>& negatives,
+                                                std::vector<int>& positives) {
+  negatives.clear();
+  positives.clear();
+
+  for (int num : arr) {
+    if (num < 0) {
+      negatives.push_back(-num);
+    } else {
+      positives.push_back(num);
+    }
+  }
+}
+
+void burykin_m_radix_all::RadixALL::MergeResults(std::vector<int>& result, const std::vector<int>& negatives,
+                                                 const std::vector<int>& positives) {
+  result.clear();
+  result.reserve(negatives.size() + positives.size());
+  result.insert(result.end(), negatives.begin(), negatives.end());
+  result.insert(result.end(), positives.begin(), positives.end());
 }
