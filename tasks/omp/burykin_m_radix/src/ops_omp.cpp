@@ -1,19 +1,22 @@
 #include "omp/burykin_m_radix/include/ops_omp.hpp"
 
+#include <omp.h>
+
+#include <algorithm>
 #include <array>
 #include <utility>
 #include <vector>
 
 std::array<int, 256> burykin_m_radix_omp::RadixOMP::ComputeFrequency(const std::vector<int>& a, const int shift) {
   std::array<int, 256> count = {};
+  const int n = static_cast<int>(a.size());
 
-#pragma omp parallel default(none) shared(a, count, shift)
+#pragma omp parallel
   {
-    // Each thread maintains its own local counter
     std::array<int, 256> local_count = {};
 
-#pragma omp for nowait
-    for (int i = 0; i < static_cast<int>(a.size()); ++i) {
+#pragma omp for nowait schedule(static)
+    for (int i = 0; i < n; ++i) {
       const int v = a[i];
       unsigned int key = ((static_cast<unsigned int>(v) >> shift) & 0xFFU);
       if (shift == 24) {
@@ -22,11 +25,10 @@ std::array<int, 256> burykin_m_radix_omp::RadixOMP::ComputeFrequency(const std::
       ++local_count[key];
     }
 
-// Merge local counters into the shared counter
-#pragma omp critical
-    {
-      for (int i = 0; i < 256; ++i) {
-        count[i] += local_count[i];
+    for (int bucket = 0; bucket < 256; ++bucket) {
+      if (local_count[bucket] > 0) {
+#pragma omp atomic
+        count[bucket] += local_count[bucket];
       }
     }
   }
@@ -36,7 +38,6 @@ std::array<int, 256> burykin_m_radix_omp::RadixOMP::ComputeFrequency(const std::
 
 std::array<int, 256> burykin_m_radix_omp::RadixOMP::ComputeIndices(const std::array<int, 256>& count) {
   std::array<int, 256> index = {0};
-  // This loop has sequential dependency, cannot be parallelized
   for (int i = 1; i < 256; ++i) {
     index[i] = index[i - 1] + count[i - 1];
   }
@@ -45,35 +46,63 @@ std::array<int, 256> burykin_m_radix_omp::RadixOMP::ComputeIndices(const std::ar
 
 void burykin_m_radix_omp::RadixOMP::DistributeElements(const std::vector<int>& a, std::vector<int>& b,
                                                        std::array<int, 256> index, const int shift) {
-  // Create a copy of indices for parallel access
-  std::array<int, 256> local_index = index;
+  const int n = static_cast<int>(a.size());
 
-  // Calculate offset for each element
-  std::vector<int> offsets(a.size());
+  const int num_threads = omp_get_max_threads();
+  std::vector<std::array<int, 256>> thread_indices(num_threads);
 
-#pragma omp parallel for default(none) shared(a, offsets, local_index, shift)
-  for (int i = 0; i < static_cast<int>(a.size()); ++i) {
-    const int v = a[i];
-    unsigned int key = ((static_cast<unsigned int>(v) >> shift) & 0xFFU);
-    if (shift == 24) {
-      key ^= 0x80;
-    }
-
-    int pos = 0;
-#pragma omp critical
-    {
-      pos = local_index[key];
-      local_index[key]++;
-    }
-
-    // Store position for later use
-    offsets[i] = pos;
+  for (int t = 0; t < num_threads; ++t) {
+    thread_indices[t] = index;
   }
 
-// Distribute elements to output array using calculated offsets
-#pragma omp parallel for default(none) shared(a, b, offsets)
-  for (int i = 0; i < static_cast<int>(a.size()); ++i) {
-    b[offsets[i]] = a[i];
+  std::vector<std::array<int, 256>> thread_counts(num_threads);
+  for (auto& tc : thread_counts) {
+    tc.fill(0);
+  }
+
+#pragma omp parallel
+  {
+    const int tid = omp_get_thread_num();
+    const int chunk_size = (n + num_threads - 1) / num_threads;
+    const int start = tid * chunk_size;
+    const int end = std::min(start + chunk_size, n);
+
+    for (int i = start; i < end; ++i) {
+      const int v = a[i];
+      unsigned int key = ((static_cast<unsigned int>(v) >> shift) & 0xFFU);
+      if (shift == 24) {
+        key ^= 0x80;
+      }
+      ++thread_counts[tid][key];
+    }
+  }
+
+  for (int bucket = 0; bucket < 256; ++bucket) {
+    int offset = index[bucket];
+    for (int t = 0; t < num_threads; ++t) {
+      thread_indices[t][bucket] = offset;
+      offset += thread_counts[t][bucket];
+    }
+  }
+
+#pragma omp parallel
+  {
+    const int tid = omp_get_thread_num();
+    const int chunk_size = (n + num_threads - 1) / num_threads;
+    const int start = tid * chunk_size;
+    const int end = std::min(start + chunk_size, n);
+
+    auto local_indices = thread_indices[tid];
+
+    for (int i = start; i < end; ++i) {
+      const int v = a[i];
+      unsigned int key = ((static_cast<unsigned int>(v) >> shift) & 0xFFU);
+      if (shift == 24) {
+        key ^= 0x80;
+      }
+
+      b[local_indices[key]++] = v;
+    }
   }
 }
 
@@ -98,19 +127,11 @@ bool burykin_m_radix_omp::RadixOMP::RunImpl() {
   std::vector<int> a = std::move(input_);
   std::vector<int> b(a.size());
 
-#pragma omp parallel
-  {
-// Single directive ensures one thread executes the outer loop
-// while inner operations can still be parallelized
-#pragma omp single
-    {
-      for (int shift = 0; shift < 32; shift += 8) {
-        auto count = ComputeFrequency(a, shift);
-        const auto index = ComputeIndices(count);
-        DistributeElements(a, b, index, shift);
-        a.swap(b);
-      }
-    }
+  for (int shift = 0; shift < 32; shift += 8) {
+    auto count = ComputeFrequency(a, shift);
+    const auto index = ComputeIndices(count);
+    DistributeElements(a, b, index, shift);
+    a.swap(b);
   }
 
   output_ = std::move(a);
@@ -121,8 +142,7 @@ bool burykin_m_radix_omp::RadixOMP::PostProcessingImpl() {
   auto* output_ptr = reinterpret_cast<int*>(task_data->outputs[0]);
   const auto output_size = static_cast<int>(output_.size());
 
-// Parallelize copying results to output buffer
-#pragma omp parallel for
+#pragma omp parallel for schedule(static, 1024)
   for (int i = 0; i < output_size; ++i) {
     output_ptr[i] = output_[i];
   }
