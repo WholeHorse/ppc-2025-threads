@@ -2,6 +2,8 @@
 
 #include <oneapi/tbb/blocked_range.h>
 #include <oneapi/tbb/parallel_for.h>
+#include <oneapi/tbb/parallel_reduce.h>
+#include <oneapi/tbb/partitioner.h>
 #include <oneapi/tbb/task_arena.h>
 
 #include <algorithm>
@@ -14,31 +16,26 @@
 
 std::array<int, 256> burykin_m_radix_tbb::RadixTBB::ComputeFrequencyParallel(const std::vector<int>& a,
                                                                              const int shift) {
-  const size_t num_threads = ppc::util::GetPPCNumThreads();
-  std::vector<std::array<int, 256>> local_counts(num_threads);
-  const size_t array_size = a.size();
-
-  tbb::parallel_for(tbb::blocked_range<size_t>(0, array_size), [&](const tbb::blocked_range<size_t>& range) {
-    size_t thread_id = tbb::this_task_arena::current_thread_index();
-    thread_id = thread_id % num_threads;
-
-    for (size_t i = range.begin(); i < range.end(); ++i) {
-      unsigned int key = ((static_cast<unsigned int>(a[i]) >> shift) & 0xFFU);
-      if (shift == 24) {
-        key ^= 0x80;
-      }
-      ++local_counts[thread_id][key];
-    }
-  });
-
-  std::array<int, 256> global_count = {};
-  for (size_t t = 0; t < num_threads; ++t) {
-    for (int i = 0; i < 256; ++i) {
-      global_count[i] += local_counts[t][i];
-    }
-  }
-
-  return global_count;
+  return tbb::parallel_reduce(
+      tbb::blocked_range<size_t>(0, a.size(), 10000), std::array<int, 256>{},
+      [&](const tbb::blocked_range<size_t>& range, std::array<int, 256> local_count) {
+        for (size_t i = range.begin(); i < range.end(); ++i) {
+          unsigned int key = ((static_cast<unsigned int>(a[i]) >> shift) & 0xFFU);
+          if (shift == 24) {
+            key ^= 0x80;
+          }
+          ++local_count[key];
+        }
+        return local_count;
+      },
+      [](const std::array<int, 256>& left, const std::array<int, 256>& right) {
+        std::array<int, 256> result{};
+        for (int i = 0; i < 256; ++i) {
+          result[i] = left[i] + right[i];
+        }
+        return result;
+      },
+      tbb::auto_partitioner());
 }
 
 std::array<int, 256> burykin_m_radix_tbb::RadixTBB::ComputeIndices(const std::array<int, 256>& count) {
@@ -52,54 +49,69 @@ std::array<int, 256> burykin_m_radix_tbb::RadixTBB::ComputeIndices(const std::ar
 void burykin_m_radix_tbb::RadixTBB::DistributeElementsParallel(const std::vector<int>& a, std::vector<int>& b,
                                                                const std::array<int, 256>& index, const int shift) {
   const size_t num_threads = ppc::util::GetPPCNumThreads();
+  const size_t n = a.size();
 
-  const size_t items_per_thread = (a.size() + num_threads - 1) / num_threads;
+  const size_t optimal_chunk_size = std::max(size_t(1000), n / (num_threads * 4));
+  const size_t num_chunks = (n + optimal_chunk_size - 1) / optimal_chunk_size;
 
-  std::vector<std::array<int, 256>> thread_counts(num_threads);
+  struct ChunkInfo {
+    std::array<int, 256> counts{};
+    size_t start_idx{};
+    size_t end_idx{};
+  };
 
-  tbb::parallel_for(tbb::blocked_range<size_t>(0, num_threads), [&](const tbb::blocked_range<size_t>& thread_range) {
-    for (size_t t = thread_range.begin(); t < thread_range.end(); ++t) {
-      thread_counts[t].fill(0);
+  std::vector<ChunkInfo> chunks(num_chunks);
 
-      size_t start = t * items_per_thread;
-      size_t end = std::min(start + items_per_thread, a.size());
+  tbb::parallel_for(
+      tbb::blocked_range<size_t>(0, num_chunks, 1),
+      [&](const tbb::blocked_range<size_t>& chunk_range) {
+        for (size_t chunk_id = chunk_range.begin(); chunk_id < chunk_range.end(); ++chunk_id) {
+          const size_t start = chunk_id * optimal_chunk_size;
+          const size_t end = std::min(start + optimal_chunk_size, n);
 
-      for (size_t i = start; i < end; ++i) {
-        unsigned int key = ((static_cast<unsigned int>(a[i]) >> shift) & 0xFFU);
-        if (shift == 24) {
-          key ^= 0x80;
+          chunks[chunk_id].start_idx = start;
+          chunks[chunk_id].end_idx = end;
+          chunks[chunk_id].counts.fill(0);
+
+          for (size_t i = start; i < end; ++i) {
+            unsigned int key = ((static_cast<unsigned int>(a[i]) >> shift) & 0xFFU);
+            if (shift == 24) {
+              key ^= 0x80;
+            }
+            ++chunks[chunk_id].counts[key];
+          }
         }
-        ++thread_counts[t][key];
-      }
-    }
-  });
+      },
+      tbb::auto_partitioner());
 
-  std::vector<std::array<int, 256>> thread_offsets(num_threads);
-  for (size_t t = 0; t < num_threads; ++t) {
-    for (int j = 0; j < 256; ++j) {
-      thread_offsets[t][j] = index[j];
-      for (size_t prev_t = 0; prev_t < t; ++prev_t) {
-        thread_offsets[t][j] += thread_counts[prev_t][j];
-      }
+  std::vector<std::array<int, 256>> chunk_offsets(num_chunks);
+
+  for (int bucket = 0; bucket < 256; ++bucket) {
+    int offset = index[bucket];
+    for (size_t chunk_id = 0; chunk_id < num_chunks; ++chunk_id) {
+      chunk_offsets[chunk_id][bucket] = offset;
+      offset += chunks[chunk_id].counts[bucket];
     }
   }
 
-  tbb::parallel_for(tbb::blocked_range<size_t>(0, num_threads), [&](const tbb::blocked_range<size_t>& thread_range) {
-    for (size_t t = thread_range.begin(); t < thread_range.end(); ++t) {
-      size_t start = t * items_per_thread;
-      size_t end = std::min(start + items_per_thread, a.size());
+  tbb::parallel_for(
+      tbb::blocked_range<size_t>(0, num_chunks, 1),
+      [&](const tbb::blocked_range<size_t>& chunk_range) {
+        for (size_t chunk_id = chunk_range.begin(); chunk_id < chunk_range.end(); ++chunk_id) {
+          auto local_offsets = chunk_offsets[chunk_id];
+          const size_t start = chunks[chunk_id].start_idx;
+          const size_t end = chunks[chunk_id].end_idx;
 
-      std::array<int, 256> local_offsets = thread_offsets[t];
-
-      for (size_t i = start; i < end; ++i) {
-        unsigned int key = ((static_cast<unsigned int>(a[i]) >> shift) & 0xFFU);
-        if (shift == 24) {
-          key ^= 0x80;
+          for (size_t i = start; i < end; ++i) {
+            unsigned int key = ((static_cast<unsigned int>(a[i]) >> shift) & 0xFFU);
+            if (shift == 24) {
+              key ^= 0x80;
+            }
+            b[local_offsets[key]++] = a[i];
+          }
         }
-        b[local_offsets[key]++] = a[i];
-      }
-    }
-  });
+      },
+      tbb::auto_partitioner());
 }
 
 bool burykin_m_radix_tbb::RadixTBB::PreProcessingImpl() {
@@ -120,7 +132,8 @@ bool burykin_m_radix_tbb::RadixTBB::RunImpl() {
     return true;
   }
 
-  oneapi::tbb::task_arena arena(ppc::util::GetPPCNumThreads());
+  const size_t num_threads = ppc::util::GetPPCNumThreads();
+  oneapi::tbb::task_arena arena(static_cast<int>(num_threads));
 
   arena.execute([&] {
     std::vector<int> a = std::move(input_);
@@ -140,8 +153,22 @@ bool burykin_m_radix_tbb::RadixTBB::RunImpl() {
 }
 
 bool burykin_m_radix_tbb::RadixTBB::PostProcessingImpl() {
-  for (size_t i = 0; i < output_.size(); ++i) {
-    reinterpret_cast<int*>(task_data->outputs[0])[i] = output_[i];
+  const size_t output_size = output_.size();
+  auto* output_ptr = reinterpret_cast<int*>(task_data->outputs[0]);
+
+  if (output_size > 1000) {
+    tbb::parallel_for(
+        tbb::blocked_range<size_t>(0, output_size, 10000),
+        [&](const tbb::blocked_range<size_t>& range) {
+          using DiffT = std::vector<int>::difference_type;
+          auto begin = output_.begin() + static_cast<DiffT>(range.begin());
+          auto end = output_.begin() + static_cast<DiffT>(range.end());
+          std::copy(begin, end, output_ptr + range.begin());
+        },
+        tbb::auto_partitioner());
+  } else {
+    std::copy(output_.begin(), output_.end(), output_ptr);
   }
+
   return true;
 }
